@@ -96,6 +96,63 @@ class TestVision(unittest.TestCase):
         self.assertIn("用户补充提示：紫色头发", content[0]["text"])
         self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
 
+    def test_looks_chinese(self):
+        self.assertTrue(vision._looks_chinese("猫娘女仆装"))
+        self.assertTrue(vision._looks_chinese("3D头像"))
+        self.assertFalse(vision._looks_chinese("シエル 3Dモデル"))   # 日语
+        self.assertFalse(vision._looks_chinese("Ciel avatar"))       # 英文
+
+    def test_translate_keywords_parse(self):
+        # mock HTTP：校验 payload 与关键词解析
+        import asyncio
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content":
+                        '{"keywords": ["猫耳", "メイド服", "3D衣装"]}'}}]}
+
+        class FakeClient:
+            def __init__(self, **kw):
+                self.payload = None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, json=None, headers=None):
+                self.last_json = json
+                return FakeResp()
+
+        captured = {}
+
+        async def run():
+            client = FakeClient()
+            async def fake_post(url, json=None, headers=None):
+                captured["url"] = url
+                captured["json"] = json
+                return FakeResp()
+            client.post = fake_post
+            import booth_search.vision as v
+            orig = v.httpx.AsyncClient
+            v.httpx.AsyncClient = lambda **kw: client
+            try:
+                return await v.translate_keywords(
+                    "猫娘女仆装", base_url="https://example.test/v1",
+                    api_key="test", model="test-model")
+            finally:
+                v.httpx.AsyncClient = orig
+
+        kws = asyncio.run(run())
+        self.assertEqual(kws, ["猫耳", "メイド服", "3D衣装"])
+        self.assertIn("/chat/completions", captured["url"])
+        self.assertEqual(captured["json"]["model"], "test-model")
+        self.assertIn("猫娘女仆装", captured["json"]["messages"][0]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

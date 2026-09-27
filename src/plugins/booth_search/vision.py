@@ -71,3 +71,39 @@ async def extract_keywords(image_bytes: bytes, *, hint: str = "",
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]
     return parse_keywords(content)
+
+
+# 中文→Booth 日语关键词的文本翻译提示词
+_TRANSLATE_PROMPT = (
+    "用户在 Booth.pm（日本同人/VRChat 素材市场）找商品，但输入的是中文。"
+    "把需求翻译成 2-4 个 Booth 站内最可能命中的日语搜索关键词"
+    "（商品类型名词用日语行业叫法，如 3Dモデル/衣装/髪型/アクセサリ/ギミック/テクスチャ；"
+    "专有名词保留罗马字/英文/片假名原样）。只输出 JSON："
+    '{"keywords": ["日语词1", "日语词2"]}'
+)
+
+
+def _looks_chinese(text: str) -> bool:
+    """检测简化字特有码位（日文汉字不在此列），用于中文需求识别。"""
+    simplified_marks = "们这说图搜贴图价买卖买现视频动发经过关软件猫丝袜女仆装饰角色宠头像见听记应东车马语读谁错银钱购"
+    return any(ch in simplified_marks for ch in text)
+
+
+async def translate_keywords(text: str, *, base_url: str, api_key: str,
+                             model: str, timeout: int = 60) -> list:
+    """中文需求 → 日语搜索关键词列表。HTTP/解析失败抛异常，由调用方退化。"""
+    url = base_url.rstrip("/") + "/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": f"{_TRANSLATE_PROMPT}\n用户需求：{text}"}],
+        "temperature": 0.2,
+        "max_tokens": 200,
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            url, json=payload,
+            headers={"Authorization": f"Bearer {api_key}"})
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+    kws, _ = parse_keywords(content)
+    return kws

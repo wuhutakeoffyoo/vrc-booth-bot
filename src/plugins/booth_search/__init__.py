@@ -156,7 +156,8 @@ async def _handle_image(image_url: str, hint: str) -> str:
     return format_results(merged, max_n=cfg.booth_limit, title=title)
 
 
-def _handle_text_sync(hint: str, adult: str | None = None) -> str:
+def _handle_text_sync(hint: str, adult: str | None = None,
+                      query_label: str | None = None) -> str:
     cfg = plugin_config
     res = booth_client.search(hint, limit=cfg.booth_limit, sort=cfg.booth_sort,
                               adult=adult or cfg.r18_mode,
@@ -166,9 +167,85 @@ def _handle_text_sync(hint: str, adult: str | None = None) -> str:
     if not items:
         return f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
     total = f"共 {res['total']:,} 件，显示前 {len(items)}:" if res.get("total") else f"前 {len(items)}:"
+    if query_label:
+        total = f"{total}\nAI 关键词: {query_label}（原词「{hint}」）"
     for it in items:
         it.setdefault("via", "")
     return format_results(items, max_n=cfg.booth_limit, title=total)
+
+
+async def _handle_text(hint: str, adult: str | None = None) -> str:
+    """文本搜索入口：中文需求先经 AI 翻译成日语关键词；直搜空结果也用 AI 重试。"""
+    cfg = plugin_config
+    ai_ready = bool(cfg.vision_api_key)
+
+    if ai_ready and vision._looks_chinese(hint):
+        try:
+            kws = await vision.translate_keywords(
+                hint, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
+                model=cfg.vision_model, timeout=cfg.vision_timeout)
+        except Exception as e:
+            logger.warning(f"中文关键词 AI 翻译失败（用原词直搜）: {e}")
+            kws = []
+        if kws:
+            try:
+                res = booth_client.search(kws[0], limit=cfg.booth_limit,
+                                          sort=cfg.booth_sort,
+                                          adult=adult or cfg.r18_mode,
+                                          cli_path=cfg.booth_cli_path,
+                                          timeout=cfg.search_timeout)
+                items = res.get("items") or []
+            except booth_client.BoothCliError as e:
+                logger.warning(f"AI 关键词搜索失败({kws[0]}): {e}")
+                items = []
+            if items:
+                seen = {it["id"] for it in items}
+                for kw in kws[1:2]:
+                    try:
+                        res2 = booth_client.search(kw, limit=cfg.booth_limit,
+                                                   sort=cfg.booth_sort,
+                                                   adult=adult or cfg.r18_mode,
+                                                   cli_path=cfg.booth_cli_path,
+                                                   timeout=cfg.search_timeout)
+                    except booth_client.BoothCliError:
+                        continue
+                    for it in res2.get("items") or []:
+                        if it["id"] not in seen:
+                            it["via"] = "关键词"
+                            seen.add(it["id"])
+                            items.append(it)
+                for it in items:
+                    it.setdefault("via", "")
+                total = (f"共 {res['total']:,} 件，显示前 {len(items)}:"
+                         if res.get("total") else f"前 {len(items)}:")
+                return format_results(items, max_n=cfg.booth_limit,
+                                      title=f"{total}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）")
+
+    # 原词直搜；空结果且 AI 可用时翻译重试
+    res = booth_client.search(hint, limit=cfg.booth_limit, sort=cfg.booth_sort,
+                              adult=adult or cfg.r18_mode,
+                              cli_path=cfg.booth_cli_path,
+                              timeout=cfg.search_timeout)
+    if (res.get("items") or []) or not ai_ready:
+        items = res.get("items") or []
+        if not items:
+            return f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
+        total = (f"共 {res['total']:,} 件，显示前 {len(items)}:"
+                 if res.get("total") else f"前 {len(items)}:")
+        for it in items:
+            it.setdefault("via", "")
+        return format_results(items, max_n=cfg.booth_limit, title=total)
+
+    try:
+        kws = await vision.translate_keywords(
+            hint, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
+            model=cfg.vision_model, timeout=cfg.vision_timeout)
+    except Exception as e:
+        logger.warning(f"AI 关键词翻译失败: {e}")
+        return f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
+    if not kws:
+        return f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
+    return _handle_text_sync(kws[0], adult=adult, query_label=" / ".join(kws[:3]))
 
 
 @matcher.handle()
@@ -188,7 +265,7 @@ async def handle_vrc_search(bot, event: MessageEvent):
                 await matcher.send("收到图片+提示，正在反查 Booth（10-60 秒）…")
             text = await _handle_image(urls[0], hint)
         else:
-            text = _handle_text_sync(hint)
+            text = await _handle_text(hint)
     except booth_client.BoothCliError as e:
         text = f"搜索失败: {e}"
     except Exception as e:
@@ -206,7 +283,7 @@ async def handle_vrc_r18(bot, event: MessageEvent):
     if not hint:
         await r18_matcher.finish("用法: /vrc r18 <关键词>（R-18 专项搜索，仅管理员）")
     try:
-        text = _handle_text_sync(hint, adult="only")
+        text = await _handle_text(hint, adult="only")
     except booth_client.BoothCliError as e:
         text = f"搜索失败: {e}"
     except Exception as e:
