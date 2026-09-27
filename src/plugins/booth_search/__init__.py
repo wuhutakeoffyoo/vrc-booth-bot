@@ -201,23 +201,25 @@ async def _handle_image(image_url: str, hint: str) -> str:
             except OSError:
                 pass
 
-    # 3) 关键词搜索合并（图搜候选优先）
+    # 3) 关键词搜索合并（图搜候选优先；前 3 个关键词都搜，召回 limit 提到 10）
     seen = {m.get("id") for m in matches}
     merged = list(matches)
-    for kw in keywords[:2]:
-        try:
-            res = booth_client.search(kw, limit=cfg.booth_limit,
-                                      sort=cfg.booth_sort, adult=cfg.r18_mode,
-                                      cli_path=cfg.booth_cli_path,
-                                      timeout=cfg.search_timeout)
-        except booth_client.BoothCliError as e:
-            logger.warning(f"关键词搜索失败({kw}): {e}")
-            continue
-        for it in res.get("items") or []:
-            if it["id"] not in seen:
-                it["via"] = "关键词"
-                seen.add(it["id"])
-                merged.append(it)
+    if keywords:
+        recall_limit = max(cfg.booth_limit, 10)
+        for kw in keywords[:3]:
+            try:
+                res = booth_client.search(kw, limit=recall_limit,
+                                          sort=cfg.booth_sort, adult=cfg.r18_mode,
+                                          cli_path=cfg.booth_cli_path,
+                                          timeout=cfg.search_timeout)
+            except booth_client.BoothCliError as e:
+                logger.warning(f"关键词搜索失败({kw}): {e}")
+                continue
+            for it in res.get("items") or []:
+                if it["id"] not in seen:
+                    it["via"] = "关键词"
+                    seen.add(it["id"])
+                    merged.append(it)
 
     if not merged:
         msg = ("没找到相关 Booth 商品。识别关键词: "
@@ -246,6 +248,31 @@ def _handle_text_sync(hint: str, adult: str | None = None,
     return format_results(items, max_n=cfg.booth_limit, title=total)
 
 
+def _search_merged(kws: list, adult: str | None = None) -> tuple[list, dict]:
+    """按顺序搜索前 3 个关键词并合并去重（召回 limit 提到 10，展示层再截断）。
+    返回 (merged_items, first_res)。单个关键词失败跳过。"""
+    cfg = plugin_config
+    limit = max(cfg.booth_limit, 10)
+    merged, seen, first_res = [], set(), {}
+    for kw in kws[:3]:
+        try:
+            res = booth_client.search(kw, limit=limit, sort=cfg.booth_sort,
+                                      adult=adult or cfg.r18_mode,
+                                      cli_path=cfg.booth_cli_path,
+                                      timeout=cfg.search_timeout)
+        except booth_client.BoothCliError as e:
+            logger.warning(f"关键词搜索失败({kw}): {e}")
+            continue
+        if not first_res:
+            first_res = res
+        for it in res.get("items") or []:
+            if it["id"] not in seen:
+                it["via"] = "关键词"
+                seen.add(it["id"])
+                merged.append(it)
+    return merged, first_res
+
+
 async def _handle_text(hint: str, adult: str | None = None) -> str:
     """文本搜索入口：中文需求先经 AI 翻译成日语关键词；直搜空结果也用 AI 重试。
     AI 失败时给用户准确原因，并注明已退化为原词直搜。"""
@@ -263,37 +290,11 @@ async def _handle_text(hint: str, adult: str | None = None) -> str:
             kws = []
             ai_note = f"⚠ AI 翻译不可用：{reason}（已用原词直搜）"
         if kws:
-            try:
-                res = booth_client.search(kws[0], limit=cfg.booth_limit,
-                                          sort=cfg.booth_sort,
-                                          adult=adult or cfg.r18_mode,
-                                          cli_path=cfg.booth_cli_path,
-                                          timeout=cfg.search_timeout)
-                items = res.get("items") or []
-            except booth_client.BoothCliError as e:
-                logger.warning(f"AI 关键词搜索失败({kws[0]}): {e}")
-                items = []
-            if items:
-                seen = {it["id"] for it in items}
-                for kw in kws[1:2]:
-                    try:
-                        res2 = booth_client.search(kw, limit=cfg.booth_limit,
-                                                   sort=cfg.booth_sort,
-                                                   adult=adult or cfg.r18_mode,
-                                                   cli_path=cfg.booth_cli_path,
-                                                   timeout=cfg.search_timeout)
-                    except booth_client.BoothCliError:
-                        continue
-                    for it in res2.get("items") or []:
-                        if it["id"] not in seen:
-                            it["via"] = "关键词"
-                            seen.add(it["id"])
-                            items.append(it)
-                for it in items:
-                    it.setdefault("via", "")
-                total = (f"共 {res['total']:,} 件，显示前 {len(items)}:"
-                         if res.get("total") else f"前 {len(items)}:")
-                return format_results(items, max_n=cfg.booth_limit,
+            merged, res = _search_merged(kws, adult)
+            if merged:
+                total = (f"共 {res.get('total') or 0:,} 件，显示前 {len(merged)}:"
+                         if res.get("total") else f"前 {len(merged)}:")
+                return format_results(merged, max_n=cfg.booth_limit,
                                       title=f"{total}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）")
 
     # 原词直搜；空结果且 AI 可用时翻译重试
@@ -327,7 +328,15 @@ async def _handle_text(hint: str, adult: str | None = None) -> str:
         return f"{msg}\n⚠ AI 翻译不可用：{reason}"
     if not kws:
         return f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
-    return _handle_text_sync(kws[0], adult=adult, query_label=" / ".join(kws[:3]))
+    merged, res = _search_merged(kws, adult)
+    if not merged:
+        return f"Booth 上没搜到「{hint}」，AI 关键词（{' / '.join(kws[:3])}）也未命中"
+    total = (f"共 {res.get('total') or 0:,} 件，显示前 {len(merged)}:"
+             if res.get("total") else f"前 {len(merged)}:")
+    for it in merged:
+        it.setdefault("via", "")
+    return format_results(merged, max_n=cfg.booth_limit,
+                          title=f"{total}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）")
 
 
 @matcher.handle()
