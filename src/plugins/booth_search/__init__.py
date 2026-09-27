@@ -222,10 +222,15 @@ async def _handle_text(hint: str, adult: str | None = None) -> str:
                                       title=f"{total}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）")
 
     # 原词直搜；空结果且 AI 可用时翻译重试
-    res = booth_client.search(hint, limit=cfg.booth_limit, sort=cfg.booth_sort,
-                              adult=adult or cfg.r18_mode,
-                              cli_path=cfg.booth_cli_path,
-                              timeout=cfg.search_timeout)
+    # （中文词在 Booth 常返回空搜索页，CLI 会抛 BoothCliError，按空结果处理）
+    try:
+        res = booth_client.search(hint, limit=cfg.booth_limit, sort=cfg.booth_sort,
+                                  adult=adult or cfg.r18_mode,
+                                  cli_path=cfg.booth_cli_path,
+                                  timeout=cfg.search_timeout)
+    except booth_client.BoothCliError as e:
+        logger.warning(f"原词直搜无结果({hint}): {e}")
+        res = {"items": [], "total": 0}
     if (res.get("items") or []) or not ai_ready:
         items = res.get("items") or []
         if not items:
