@@ -1,0 +1,18 @@
+[project]
+name = "booth-bot"
+version = "0.1.0"
+description = "NoneBot2 bot 接入 booth-cli：/vrc search 文本或图片搜 Booth.pm 商品（含识图 AI 提词）"
+requires-python = ">=3.10"
+dependencies = [
+    "nonebot2[fastapi]>=2.3.0,<3",
+    "nonebot-adapter-onebot>=2.4.0,<3",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src/plugins"]
+include = ["booth_search*"]
