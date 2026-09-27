@@ -100,8 +100,8 @@ class TestVision(unittest.TestCase):
         self.assertTrue(vision._looks_chinese("猫娘女仆装"))
         self.assertTrue(vision._looks_chinese("3D头像"))
         self.assertTrue(vision._looks_chinese("信浓 原创VRChat模型"))   # 汉字+英文
+        self.assertTrue(vision._looks_chinese("手枪道具 3Dギミック"))    # 简体字特有形优先于假名
         self.assertFalse(vision._looks_chinese("シエル 3Dモデル"))       # 假名=日语
-        self.assertFalse(vision._looks_chinese("手枪道具 3Dギミック"))   # 混入片假名
         self.assertFalse(vision._looks_chinese("Ciel avatar"))           # 纯英文
 
     def test_translate_keywords_parse(self):
