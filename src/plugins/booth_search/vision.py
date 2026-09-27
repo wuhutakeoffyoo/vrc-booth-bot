@@ -96,6 +96,24 @@ def _api_content(resp_json: dict) -> str:
     return content
 
 
+async def _api_post(url: str, payload: dict, api_key: str,
+                    session_id: str = "", timeout: int = 60,
+                    retries: int = 2) -> str:
+    """POST chat/completions，传输类错误（连接重置等）自动重试，返回回复文本。"""
+    headers = {"Authorization": f"Bearer {api_key}",
+               "x-opencode-session": _session_header(session_id)}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for attempt in range(retries + 1):
+            try:
+                resp = await client.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                return _api_content(resp.json())
+            except httpx.TransportError:
+                if attempt == retries:
+                    raise
+                await asyncio.sleep(1.5 * (attempt + 1))
+
+
 async def extract_keywords(image_bytes: bytes, *, hint: str = "",
                            base_url: str, api_key: str, model: str,
                            session_id: str = "", timeout: int = 60) -> tuple[list, str]:
@@ -108,13 +126,7 @@ async def extract_keywords(image_bytes: bytes, *, hint: str = "",
         "temperature": 0.2,
         "max_tokens": 2000,
     }
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            url, json=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "x-opencode-session": _session_header(session_id)})
-        resp.raise_for_status()
-        content = _api_content(resp.json())
+    content = await _api_post(url, payload, api_key, session_id, timeout)
     return parse_keywords(content)
 
 
@@ -146,13 +158,7 @@ async def translate_keywords(text: str, *, base_url: str, api_key: str,
         "temperature": 0.2,
         "max_tokens": 2000,
     }
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            url, json=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "x-opencode-session": _session_header(session_id)})
-        resp.raise_for_status()
-        content = _api_content(resp.json())
+    content = await _api_post(url, payload, api_key, session_id, timeout)
     kws, _ = parse_keywords(content)
     return kws
 
