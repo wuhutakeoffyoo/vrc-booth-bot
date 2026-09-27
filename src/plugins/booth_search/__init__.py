@@ -78,7 +78,8 @@ async def _handle_image(image_url: str, hint: str) -> str:
             tmp_path = tf.name
         data = booth_client.imgsearch(
             tmp_path, headless=cfg.imgsearch_headless,
-            limit=cfg.booth_limit, timeout=cfg.imgsearch_timeout)
+            limit=cfg.booth_limit, cli_path=cfg.booth_cli_path,
+            timeout=cfg.imgsearch_timeout)
         matches = data.get("matches") or []
         if data.get("derived_query") and data["derived_query"] not in keywords:
             keywords.append(data["derived_query"])
