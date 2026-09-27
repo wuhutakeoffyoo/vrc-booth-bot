@@ -21,3 +21,12 @@ class Config(BaseModel):
     vision_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
     vision_model: str = "glm-5.3-flash"
     vision_timeout: int = 60
+
+    # 访问控制
+    # 群白名单（空 = 不限制群；.env 示例: GROUP_WHITELIST='["111","222"]'，
+    # JSON 数组里写纯数字 QQ/群号（int）也可以，内部统一字符串化）
+    group_whitelist: list[int | str] = []
+    # 管理员 QQ（可用敏感指令；.env 示例: ADMIN_USERS='["111","222"]'）
+    admin_users: list[int | str] = []
+    # 非管理员私聊是否可用（True=可用；False=私聊仅管理员）
+    allow_private: bool = True

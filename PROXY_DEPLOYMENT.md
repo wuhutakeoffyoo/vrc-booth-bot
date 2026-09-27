@@ -62,7 +62,7 @@ QQ 消息 → 京东云 NapCat --反向WS(带 access_token)--> 腾讯云SG NoneB
      `{"enable":true,"name":"booth-bot","url":"ws://<SG_HOST>:8080/onebot/v11/ws",
        "messagePostFormat":"array","token":"<SG .env 中的 token>",
        "heartInterval":30000,"reconnectInterval":5000,"reportSelfMessage":false}`
-     （账号 <QQ_A> 与 <QQ_B> 二选一，改完重启 napcat 容器）。
+     （在 NapCat 配置文件 onebot11_<QQ号>.json 里选目标账号的 websocketClients，改完重启 napcat 容器）。
 
 ## 部署清单（每步先跑 probe 对应项）
 

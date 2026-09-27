@@ -1,5 +1,10 @@
 """booth_search 插件：/vrc search <关键词> 或 /vrc search + 图片。
 
+访问控制（逻辑在 access.py）：
+- 群白名单 GROUP_WHITELIST 非空时，仅白名单群响应（白名单外静默忽略）；
+- 私聊：管理员始终可用；非管理员由 ALLOW_PRIVATE 决定；
+- 敏感指令 /vrc r18（R-18 专项搜索）仅管理员可用。
+
 图片流程：识图 AI 提取关键词（可配置，无 key 自动跳过）→ booth imgsearch 反查 +
 关键词搜索合并。文本流程：直接关键词搜索。
 """
@@ -13,22 +18,55 @@ from nonebot import get_plugin_config, logger, on_message
 from nonebot.adapters.onebot.v11 import MessageEvent
 from nonebot.rule import Rule
 
-from . import booth_client, vision
+from . import access, booth_client, vision
 from .config import Config
 from .format import format_results
 
 plugin_config = get_plugin_config(Config)
 
 SEARCH_RE = re.compile(r"^[/！!]?vrc\s*search(?:\s+(.*))?$", re.I | re.S)
+R18_RE = re.compile(r"^[/！!]?vrc\s*r18(?:\s+(.*))?$", re.I | re.S)
 USAGE = ("用法:\n/vrc search <关键词>   —— Booth 商品搜索\n"
          "/vrc search + 图片     —— 以图搜图（可附文字提示）")
+DENY_MSG = "该指令仅对管理员开放"
+
+
+def _plain(event) -> str:
+    try:
+        return event.get_plaintext().strip()
+    except Exception:
+        return ""
+
+
+def _is_admin(event) -> bool:
+    return access.is_admin(plugin_config, getattr(event, "user_id", ""))
+
+
+def _access_ok(event) -> bool:
+    return access.access_ok(plugin_config,
+                            user_id=getattr(event, "user_id", ""),
+                            group_id=getattr(event, "group_id", None))
 
 
 def _is_search(event) -> bool:
-    return bool(SEARCH_RE.match(event.get_plaintext().strip()))
+    return bool(SEARCH_RE.match(_plain(event)))
 
 
-matcher = on_message(Rule(_is_search), priority=10, block=True)
+def _is_r18(event) -> bool:
+    return bool(R18_RE.match(_plain(event)))
+
+
+# nonebot Rule 按参数名识别依赖（event 为魔法名），不能用任意命名的 lambda
+def _search_rule(event) -> bool:
+    return _is_search(event) and _access_ok(event)
+
+
+def _r18_rule(event) -> bool:
+    return _is_r18(event) and _access_ok(event)
+
+
+matcher = on_message(Rule(_search_rule), priority=10, block=True)
+r18_matcher = on_message(Rule(_r18_rule), priority=10, block=True)
 
 
 def _collect_image_urls(event: MessageEvent) -> list:
@@ -118,10 +156,11 @@ async def _handle_image(image_url: str, hint: str) -> str:
     return format_results(merged, max_n=cfg.booth_limit, title=title)
 
 
-def _handle_text_sync(hint: str) -> str:
+def _handle_text_sync(hint: str, adult: str | None = None) -> str:
     cfg = plugin_config
     res = booth_client.search(hint, limit=cfg.booth_limit, sort=cfg.booth_sort,
-                              adult=cfg.r18_mode, cli_path=cfg.booth_cli_path,
+                              adult=adult or cfg.r18_mode,
+                              cli_path=cfg.booth_cli_path,
                               timeout=cfg.search_timeout)
     items = res.get("items") or []
     if not items:
@@ -134,7 +173,7 @@ def _handle_text_sync(hint: str) -> str:
 
 @matcher.handle()
 async def handle_vrc_search(bot, event: MessageEvent):
-    m = SEARCH_RE.match(event.get_plaintext().strip())
+    m = SEARCH_RE.match(_plain(event))
     hint = (m.group(1) or "").strip() if m else ""
     urls = _collect_image_urls(event)
 
@@ -156,3 +195,21 @@ async def handle_vrc_search(bot, event: MessageEvent):
         logger.exception("vrc search 未捕获异常")
         text = f"内部错误: {type(e).__name__}: {e}"
     await matcher.finish(text)
+
+
+@r18_matcher.handle()
+async def handle_vrc_r18(bot, event: MessageEvent):
+    if not access.sensitive_allowed(plugin_config, getattr(event, "user_id", "")):
+        await r18_matcher.finish(DENY_MSG)
+    m = R18_RE.match(_plain(event))
+    hint = (m.group(1) or "").strip() if m else ""
+    if not hint:
+        await r18_matcher.finish("用法: /vrc r18 <关键词>（R-18 专项搜索，仅管理员）")
+    try:
+        text = _handle_text_sync(hint, adult="only")
+    except booth_client.BoothCliError as e:
+        text = f"搜索失败: {e}"
+    except Exception as e:
+        logger.exception("vrc r18 未捕获异常")
+        text = f"内部错误: {type(e).__name__}: {e}"
+    await r18_matcher.finish(text)
