@@ -71,7 +71,8 @@ def build_messages(hint: str, image_bytes: bytes) -> list:
 
 
 def parse_keywords(content: str) -> tuple[list, str]:
-    """从模型回复中解析关键词列表与商品类型，容错（JSON 围栏/坏 JSON/纯文本）。"""
+    """从模型回复中解析关键词列表与商品类型，容错（JSON 围栏/坏 JSON/纯文本）。
+    过滤推理模型泄漏的思考过程长句。"""
     item_type = ""
     m = re.search(r"\{.*\}", content or "", re.S)
     if m:
@@ -80,36 +81,53 @@ def parse_keywords(content: str) -> tuple[list, str]:
             kws = data.get("keywords") or []
             item_type = str(data.get("item_type") or "")
             if isinstance(kws, list):
-                return [str(k).strip() for k in kws if str(k).strip()], item_type
+                clean = [str(k).strip() for k in kws
+                         if str(k).strip() and not _is_reasoning_prose(str(k))]
+                return clean, item_type
         except (json.JSONDecodeError, AttributeError):
             pass
     # 兜底：按行/分隔符拆
     parts = re.split(r"[\n,，、/|]+", content or "")
-    return [p.strip(" -·*") for p in parts if len(p.strip(" -·*")) >= 2][:8], item_type
+    clean = [p.strip(" -·*") for p in parts
+             if len(p.strip(" -·*")) >= 2 and not _is_reasoning_prose(p)]
+    return clean[:8], item_type
 
 
 def expand_reading_variants(keywords: list) -> list:
-    """为含汉字的关键词追加平假名读音变体（pykakasi，开源词典转换）。
-
-    Booth 商品标题的词形不统一（信濃 vs しなの），Booth 搜索不做跨字形归一，
-    读音变体能显著提升召回。pykakasi 未安装时原样返回（优雅退化）。
-    """
-    try:
-        import pykakasi
-    except ImportError:
-        return list(keywords)
-    kks = pykakasi.kakasi()
-    kks.setMode("J", "H")  # 汉字→平假名读音（片假名保持原样）
-    conv = kks.getConverter()
+    """为关键词追加搜索变体（开源工具链）：
+    1. pykakasi 汉字→平假名读音（信濃→しなの；Booth 标题词形不统一且搜索
+       不做跨字形归一）；pykakasi 未安装时跳过该维度。
+    2. 去空格连写形（ショコラ ドレス→ショコラドレス；Booth 分词为 AND 匹配，
+       连写复合词必须整词命中）。"""
     out = []
     seen = set()
+    try:
+        import pykakasi
+        kks = pykakasi.kakasi()
+        kks.setMode("J", "H")  # 汉字→平假名读音（片假名保持原样）
+        conv = kks.getConverter()
+    except ImportError:
+        conv = None
     for kw in keywords:
-        for form in (kw, conv.do(kw)):
+        forms = [kw]
+        if conv is not None:
+            forms.append(conv.do(kw))
+        if " " in kw:
+            forms.append(kw.replace(" ", ""))
+        for form in forms:
             form = form.strip()
             if form and form not in seen:
                 seen.add(form)
                 out.append(form)
     return out
+
+
+def _is_reasoning_prose(text: str) -> bool:
+    """识别推理模型泄漏的思考过程文本（非关键词）。"""
+    if len(text) > 30 or "..." in text:
+        return True
+    lowered = text.lower()
+    return lowered.startswith(("let me", "the image", "this image", "i ", "分析", "图中"))
 
 
 def friendly_ai_error(e: Exception) -> str:

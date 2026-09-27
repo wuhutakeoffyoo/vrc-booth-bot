@@ -117,30 +117,51 @@ def _ai_backend() -> tuple[str, str]:
 
 
 async def _ai_translate(text: str) -> list:
+    """api 失败时自动回落 cli 后端（free 模型），都失败抛最后一个异常。"""
     cfg = plugin_config
     mode, param = _ai_backend()
-    if mode == "cli":
-        return await vision.translate_keywords_cli(
-            text, bin_path=param, model=cfg.ai_cli_model,
-            timeout=cfg.ai_cli_timeout)
-    return await vision.translate_keywords(
-        text, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
-        model=cfg.vision_model, session_id=cfg.vision_session_id,
-        timeout=cfg.vision_timeout)
+    if mode == "api":
+        try:
+            return await vision.translate_keywords(
+                text, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
+                model=cfg.vision_model, session_id=cfg.vision_session_id,
+                timeout=cfg.vision_timeout)
+        except Exception as e:
+            logger.warning(f"api 后端失败，尝试 cli 兜底: {vision.friendly_ai_error(e)}")
+            try:
+                cli_bin = vision.resolve_cli_bin(cfg.ai_cli_bin)
+            except RuntimeError:
+                raise e
+            return await vision.translate_keywords_cli(
+                text, bin_path=cli_bin, model=cfg.ai_cli_model,
+                timeout=cfg.ai_cli_timeout)
+    return await vision.translate_keywords_cli(
+        text, bin_path=param, model=cfg.ai_cli_model,
+        timeout=cfg.ai_cli_timeout)
 
 
 async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
     cfg = plugin_config
     mode, param = _ai_backend()
-    if mode == "cli":
-        return await vision.extract_keywords_cli(
-            image_path, hint=hint, bin_path=param,
-            model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
-    image_bytes = Path(image_path).read_bytes()
-    return await vision.extract_keywords(
-        image_bytes, hint=hint, base_url=cfg.vision_base_url,
-        api_key=cfg.vision_api_key, model=cfg.vision_model,
-        session_id=cfg.vision_session_id, timeout=cfg.vision_timeout)
+    if mode == "api":
+        try:
+            image_bytes = Path(image_path).read_bytes()
+            return await vision.extract_keywords(
+                image_bytes, hint=hint, base_url=cfg.vision_base_url,
+                api_key=cfg.vision_api_key, model=cfg.vision_model,
+                session_id=cfg.vision_session_id, timeout=cfg.vision_timeout)
+        except Exception as e:
+            logger.warning(f"api 后端失败，尝试 cli 兜底: {vision.friendly_ai_error(e)}")
+            try:
+                cli_bin = vision.resolve_cli_bin(cfg.ai_cli_bin)
+            except RuntimeError:
+                raise e
+            return await vision.extract_keywords_cli(
+                image_path, hint=hint, bin_path=cli_bin,
+                model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
+    return await vision.extract_keywords_cli(
+        image_path, hint=hint, bin_path=param,
+        model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
 
 
 async def _handle_image(image_url: str, hint: str) -> str:
