@@ -46,6 +46,24 @@ QQ 消息 → 京东云 NapCat --反向WS(带 access_token)--> 腾讯云SG NoneB
                                                         └→ booth.pm / booth.pximg.net / bing（SG 直连出口）
 ```
 
+## 部署实录（2026-09-27 晚，SG 已完成）
+
+- **booth-bot 已在 SG 上线**：`~/booth-bot`（deploy key 只读克隆）、venv 装依赖、
+  systemd 服务 `booth-bot.service`（active + enabled，开机自启，监听 0.0.0.0:8080）。
+- **booth-cli 同机部署**：`~/booth-cli`，`.env` 的 `BOOTH_CLI_PATH` 指向它。
+- **图片链路实测通过**：识图派生词 "Ciel+ 3Dアニメ キャラクター" → Top1 命中
+  #3368697，全程免浏览器（服务器未装 playwright/Chrome）。
+- 部署密钥：服务器 `~/.ssh/deploy_ed25519`（booth-cli）与 `~/.ssh/deploy_bot_ed25519`
+  （booth-bot），均为 GitHub 只读 deploy key；仓库内 `core.sshCommand` 已配置。
+- WS token：随机生成写入 `~/booth-bot/.env`（600 权限）。
+- **阻塞项（用户操作）**：
+  1. 腾讯云控制台安全组放行 TCP 8080（外部 curl 超时=未放行，服务器本机 404=服务正常）；
+  2. 在京东云 NapCat 的 onebot11 配置里给目标 QQ 号添加反向 WS 客户端：
+     `{"enable":true,"name":"booth-bot","url":"ws://<SG_HOST>:8080/onebot/v11/ws",
+       "messagePostFormat":"array","token":"<SG .env 中的 token>",
+       "heartInterval":30000,"reconnectInterval":5000,"reportSelfMessage":false}`
+     （账号 <QQ_A> 与 <QQ_B> 二选一，改完重启 napcat 容器）。
+
 ## 部署清单（每步先跑 probe 对应项）
 
 1. **探针**：两台服务器各跑 `scripts/probe.sh`，确认：
