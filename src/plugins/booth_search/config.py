@@ -22,10 +22,12 @@ class Config(BaseModel):
     ai_cli_bin: str = ""               # opencode 可执行文件路径（空则从 PATH 找）
     ai_cli_model: str = "opencode/mimo-v2.6-flash-free"
     ai_cli_timeout: int = 90
-    # api 模式（OpenAI 兼容 chat/completions；留空 key 则 AI 功能整体关闭）
+    # api 模式（OpenCode Zen Go 端点 / GLM 直连等 OpenAI 兼容端点）
+    # Go 端点: https://opencode.ai/zen/go/v1 （模型走套餐额度，需 session 头）
     vision_api_key: str = ""
-    vision_base_url: str = "https://opencode.ai/zen/v1"
+    vision_base_url: str = "https://opencode.ai/zen/go/v1"
     vision_model: str = "glm-5.3-flash"
+    vision_session_id: str = ""        # x-opencode-session 头；空则每请求自动生成
     vision_timeout: int = 60
 
     # 访问控制

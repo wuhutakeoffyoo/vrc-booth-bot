@@ -1,21 +1,45 @@
 """识图 AI 客户端：双后端。
 
-- cli: 本机 opencode CLI（`opencode run`，Go 套餐 free 模型可用，支持 -f 附图）
-- api: OpenAI 兼容 chat/completions 多模态接口（GLM / DeepSeek / Zen 按量模型）
+- api: OpenAI 兼容 chat/completions（OpenCode Zen Go 端点 / GLM 直连等）。
+  Go 端点要求 x-opencode-session 头标识客户端会话。
+- cli: 本机 opencode CLI（`opencode run`，free 模型可用，支持 -f 附图）
 
 key 只从配置读取，本模块不落任何凭据。
 """
 import asyncio
 import base64
+import ipaddress
 import json
 import re
 import shutil
 import subprocess
+import urllib.parse
+import uuid
 from pathlib import Path
 
 import httpx
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def guard_api_base(base_url: str) -> str:
+    """出站前校验 API base：仅 https 且主机非本机/私网/保留地址。"""
+    parts = urllib.parse.urlsplit(base_url)
+    host = parts.hostname or ""
+    if parts.scheme != "https" or not host:
+        raise RuntimeError(f"VISION_BASE_URL 必须是 https: {base_url}")
+    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or host.endswith((".local", ".internal")):
+        raise RuntimeError(f"VISION_BASE_URL 主机不被允许: {host}")
+    try:
+        if ipaddress.ip_address(host).is_private or ipaddress.ip_address(host).is_reserved:
+            raise RuntimeError(f"VISION_BASE_URL 指向私网/保留地址: {host}")
+    except ValueError:
+        pass  # 域名（非 IP 字面量），放行
+    return base_url
+
+
+def _session_header(session_id: str) -> str:
+    return session_id or f"booth-bot-{uuid.uuid4().hex[:16]}"
 
 # 提词目标：VRChat 素材（模型/衣装/髪型/配件/ギミック/テクスチャ/ツール）
 _VISION_PROMPT = (
@@ -62,23 +86,35 @@ def parse_keywords(content: str) -> tuple[list, str]:
     return [p.strip(" -·*") for p in parts if len(p.strip(" -·*")) >= 2][:8], item_type
 
 
+def _api_content(resp_json: dict) -> str:
+    """取模型回复文本；推理模型可能把内容放在 reasoning_content 或超长截断。"""
+    choice = (resp_json.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    content = msg.get("content") or ""
+    if not content.strip():
+        content = msg.get("reasoning_content") or ""
+    return content
+
+
 async def extract_keywords(image_bytes: bytes, *, hint: str = "",
                            base_url: str, api_key: str, model: str,
-                           timeout: int = 60) -> tuple[list, str]:
+                           session_id: str = "", timeout: int = 60) -> tuple[list, str]:
     """调用识图模型，返回 (keywords, item_type)。HTTP 错误抛 httpx.HTTPStatusError。"""
+    guard_api_base(base_url)
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
         "messages": build_messages(hint, image_bytes),
         "temperature": 0.2,
-        "max_tokens": 500,
+        "max_tokens": 2000,
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
             url, json=payload,
-            headers={"Authorization": f"Bearer {api_key}"})
+            headers={"Authorization": f"Bearer {api_key}",
+                     "x-opencode-session": _session_header(session_id)})
         resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
+        content = _api_content(resp.json())
     return parse_keywords(content)
 
 
@@ -99,21 +135,24 @@ def _looks_chinese(text: str) -> bool:
 
 
 async def translate_keywords(text: str, *, base_url: str, api_key: str,
-                             model: str, timeout: int = 60) -> list:
+                             model: str, session_id: str = "",
+                             timeout: int = 60) -> list:
     """中文需求 → 日语搜索关键词列表。HTTP/解析失败抛异常，由调用方退化。"""
+    guard_api_base(base_url)
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": f"{_TRANSLATE_PROMPT}\n用户需求：{text}"}],
         "temperature": 0.2,
-        "max_tokens": 200,
+        "max_tokens": 2000,
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
             url, json=payload,
-            headers={"Authorization": f"Bearer {api_key}"})
+            headers={"Authorization": f"Bearer {api_key}",
+                     "x-opencode-session": _session_header(session_id)})
         resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
+        content = _api_content(resp.json())
     kws, _ = parse_keywords(content)
     return kws
 

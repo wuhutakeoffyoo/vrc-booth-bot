@@ -205,5 +205,24 @@ class TestVision(unittest.TestCase):
                     "x", bin_path="/fake/opencode", model="m", timeout=5))
 
 
+    def test_guard_api_base(self):
+        self.assertEqual(vision.guard_api_base("https://opencode.ai/zen/go/v1"),
+                         "https://opencode.ai/zen/go/v1")
+        for bad in ("http://opencode.ai/zen/go/v1", "https://localhost/v1",
+                    "https://127.0.0.1/v1", "https://192.168.1.1/v1",
+                    "https://10.0.0.5/v1", "ftp://opencode.ai/v1"):
+            with self.assertRaises(RuntimeError):
+                vision.guard_api_base(bad)
+
+    def test_api_content_fallback_to_reasoning(self):
+        self.assertEqual(vision._api_content(
+            {"choices": [{"message": {"content": '{"keywords":["x"]}'}}]}),
+            '{"keywords":["x"]}')
+        self.assertEqual(vision._api_content(
+            {"choices": [{"message": {"content": None,
+                                      "reasoning_content": "推理里含答案"}}]}),
+            "推理里含答案")
+
+
 if __name__ == "__main__":
     unittest.main()

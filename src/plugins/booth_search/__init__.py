@@ -115,7 +115,8 @@ async def _ai_translate(text: str) -> list:
             timeout=cfg.ai_cli_timeout)
     return await vision.translate_keywords(
         text, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
-        model=cfg.vision_model, timeout=cfg.vision_timeout)
+        model=cfg.vision_model, session_id=cfg.vision_session_id,
+        timeout=cfg.vision_timeout)
 
 
 async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
@@ -129,7 +130,7 @@ async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
     return await vision.extract_keywords(
         image_bytes, hint=hint, base_url=cfg.vision_base_url,
         api_key=cfg.vision_api_key, model=cfg.vision_model,
-        timeout=cfg.vision_timeout)
+        session_id=cfg.vision_session_id, timeout=cfg.vision_timeout)
 
 
 async def _handle_image(image_url: str, hint: str) -> str:
