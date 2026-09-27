@@ -253,5 +253,20 @@ class TestVision(unittest.TestCase):
             RuntimeError("opencode run 失败: Insufficient account funds")))
 
 
+    def test_expand_reading_variants(self):
+        has_pykakasi = True
+        try:
+            import pykakasi  # noqa: F401
+        except ImportError:
+            has_pykakasi = False
+        if not has_pykakasi:
+            self.skipTest("pykakasi not installed")
+        out = vision.expand_reading_variants(["信濃 3Dモデル"])
+        self.assertEqual(out[0], "信濃 3Dモデル")
+        self.assertIn("しなの 3Dモデル", out[1:])
+        # 无汉字词不产生变体
+        self.assertEqual(vision.expand_reading_variants(["ツインテール"]), ["ツインテール"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -88,6 +88,30 @@ def parse_keywords(content: str) -> tuple[list, str]:
     return [p.strip(" -·*") for p in parts if len(p.strip(" -·*")) >= 2][:8], item_type
 
 
+def expand_reading_variants(keywords: list) -> list:
+    """为含汉字的关键词追加平假名读音变体（pykakasi，开源词典转换）。
+
+    Booth 商品标题的词形不统一（信濃 vs しなの），Booth 搜索不做跨字形归一，
+    读音变体能显著提升召回。pykakasi 未安装时原样返回（优雅退化）。
+    """
+    try:
+        import pykakasi
+    except ImportError:
+        return list(keywords)
+    kks = pykakasi.kakasi()
+    kks.setMode("J", "H")  # 汉字→平假名读音（片假名保持原样）
+    conv = kks.getConverter()
+    out = []
+    seen = set()
+    for kw in keywords:
+        for form in (kw, conv.do(kw)):
+            form = form.strip()
+            if form and form not in seen:
+                seen.add(form)
+                out.append(form)
+    return out
+
+
 def friendly_ai_error(e: Exception) -> str:
     """把 AI 调用异常翻译成准确、可行动的中文反馈（给群友看的）。"""
     if isinstance(e, httpx.HTTPStatusError):

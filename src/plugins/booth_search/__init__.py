@@ -266,13 +266,13 @@ def _handle_text_sync(hint: str, adult: str | None = None,
 
 
 def _search_merged(kws: list, adult: str | None = None) -> tuple[list, dict]:
-    """按顺序搜索前 3 个关键词并合并去重（召回 limit 提到 10，展示层再截断）。
-    标题含任一关键词的候选置顶（稳定排序，对抗 popularity 淹没）。
+    """按顺序搜索前 4 个关键词（含读音变体）并合并去重（召回 limit 提到 10，
+    展示层再截断）。标题含任一关键词的候选置顶（稳定排序，对抗 popularity 淹没）。
     返回 (merged_items, first_res)。单个关键词失败跳过。"""
     cfg = plugin_config
     limit = max(cfg.booth_limit, 10)
     merged, seen, first_res = [], set(), {}
-    for kw in kws[:3]:
+    for kw in kws[:4]:
         try:
             res = booth_client.search(kw, limit=limit, sort=cfg.booth_sort,
                                       adult=adult or cfg.r18_mode,
@@ -306,6 +306,7 @@ async def _handle_text(hint: str, adult: str | None = None) -> str:
     if ai_ready and vision._looks_chinese(hint):
         try:
             kws = await _ai_translate(hint)
+            kws = vision.expand_reading_variants(kws)  # 汉字词追加假名读音变体
         except Exception as e:
             reason = vision.friendly_ai_error(e)
             logger.warning(f"中文关键词 AI 翻译失败（用原词直搜）: {e}")
@@ -314,8 +315,9 @@ async def _handle_text(hint: str, adult: str | None = None) -> str:
         if kws:
             merged, res = _search_merged(kws, adult)
             if merged:
-                total = (f"共 {res.get('total') or 0:,} 件，显示前 {len(merged)}:"
-                         if res.get("total") else f"前 {len(merged)}:")
+                shown = min(len(merged), cfg.booth_limit)
+                total = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:"
+                         if res.get("total") else f"前 {shown}:")
                 return format_results(merged, max_n=cfg.booth_limit,
                                       title=f"{total}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）")
 
@@ -343,6 +345,7 @@ async def _handle_text(hint: str, adult: str | None = None) -> str:
 
     try:
         kws = await _ai_translate(hint)
+        kws = vision.expand_reading_variants(kws)  # 汉字词追加假名读音变体
     except Exception as e:
         reason = vision.friendly_ai_error(e)
         logger.warning(f"AI 关键词翻译失败: {e}")
