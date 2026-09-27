@@ -224,5 +224,32 @@ class TestVision(unittest.TestCase):
             "推理里含答案")
 
 
+    def test_friendly_ai_error_classification(self):
+        import httpx
+
+        def mk_status(code, body=""):
+            req = httpx.Request("POST", "https://x.test/v1/chat/completions")
+            resp = httpx.Response(code, text=body, request=req)
+            return httpx.HTTPStatusError(f"HTTP {code}", request=req, response=resp)
+
+        cases = [
+            (mk_status(402), "额度不足"),
+            (mk_status(429, "5 hour usage limit exceeded"), "5 小时"),
+            (mk_status(429, "weekly usage limit exceeded"), "每周"),
+            (mk_status(429, "monthly usage limit exceeded"), "每月"),
+            (mk_status(429, "rate limited"), "限流"),
+            (mk_status(401), "key 无效"),
+            (mk_status(403), "拦截"),
+            (mk_status(502), "上游故障"),
+        ]
+        for exc, expect in cases:
+            self.assertIn(expect, vision.friendly_ai_error(exc))
+        self.assertIn("网络异常", vision.friendly_ai_error(
+            httpx.ConnectError("connection refused")))
+        self.assertIn("超时", vision.friendly_ai_error(httpx.ReadTimeout("t")))
+        self.assertIn("额度不足", vision.friendly_ai_error(
+            RuntimeError("opencode run 失败: Insufficient account funds")))
+
+
 if __name__ == "__main__":
     unittest.main()

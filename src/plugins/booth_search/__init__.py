@@ -145,10 +145,19 @@ async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
 
 async def _handle_image(image_url: str, hint: str) -> str:
     cfg = plugin_config
-    image_bytes = await _download_image(image_url)
+    try:
+        image_bytes = await _download_image(image_url)
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        tip = ("图床临时不可用（5xx），请稍后重发"
+               if code >= 500 else f"图片下载失败（HTTP {code}），确认图片链接有效")
+        return f"⚠ {tip}"
+    except httpx.TransportError:
+        return "⚠ 图片下载失败：网络异常，请稍后重发"
 
     # 1) 识图 AI 提词（AI 不可用则跳过，仅靠 CLI 自带派生词）
     keywords, item_type = [], ""
+    ai_note = ""
     mode, _ = _ai_backend()
     if mode:
         tmp_for_ai = None
@@ -159,7 +168,9 @@ async def _handle_image(image_url: str, hint: str) -> str:
             keywords, item_type = await _ai_vision(tmp_for_ai, hint)
             logger.info(f"识图关键词: {keywords} (type={item_type})")
         except Exception as e:
+            reason = vision.friendly_ai_error(e)
             logger.warning(f"识图 AI 失败（退化为纯图搜）: {e}")
+            ai_note = f"⚠ AI 提词不可用：{reason}（已用图搜派生词）"
         finally:
             if tmp_for_ai:
                 try:
@@ -209,11 +220,12 @@ async def _handle_image(image_url: str, hint: str) -> str:
                 merged.append(it)
 
     if not merged:
-        return ("没找到相关 Booth 商品。识别关键词: "
-                + (" / ".join(keywords[:5]) or "（无）")
-                + "\n可尝试补充文字提示重发：/vrc search <提示> + 图片")
+        msg = ("没找到相关 Booth 商品。识别关键词: "
+               + (" / ".join(keywords[:5]) or "（无）"))
+        return f"{msg}\n{ai_note}" if ai_note else msg
     title = "识图关键词: " + (" / ".join(keywords[:5]) or "（无）") if keywords else "图搜结果:"
-    return format_results(merged, max_n=cfg.booth_limit, title=title)
+    out = format_results(merged, max_n=cfg.booth_limit, title=title)
+    return f"{out}\n{ai_note}" if ai_note else out
 
 
 def _handle_text_sync(hint: str, adult: str | None = None,
@@ -235,17 +247,21 @@ def _handle_text_sync(hint: str, adult: str | None = None,
 
 
 async def _handle_text(hint: str, adult: str | None = None) -> str:
-    """文本搜索入口：中文需求先经 AI 翻译成日语关键词；直搜空结果也用 AI 重试。"""
+    """文本搜索入口：中文需求先经 AI 翻译成日语关键词；直搜空结果也用 AI 重试。
+    AI 失败时给用户准确原因，并注明已退化为原词直搜。"""
     cfg = plugin_config
     ai_mode, _ = _ai_backend()
     ai_ready = bool(ai_mode)
+    ai_note = ""  # AI 不可用时的用户反馈行
 
     if ai_ready and vision._looks_chinese(hint):
         try:
             kws = await _ai_translate(hint)
         except Exception as e:
+            reason = vision.friendly_ai_error(e)
             logger.warning(f"中文关键词 AI 翻译失败（用原词直搜）: {e}")
             kws = []
+            ai_note = f"⚠ AI 翻译不可用：{reason}（已用原词直搜）"
         if kws:
             try:
                 res = booth_client.search(kws[0], limit=cfg.booth_limit,
@@ -293,18 +309,22 @@ async def _handle_text(hint: str, adult: str | None = None) -> str:
     if (res.get("items") or []) or not ai_ready:
         items = res.get("items") or []
         if not items:
-            return f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
+            msg = f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
+            return f"{msg}\n{ai_note}" if ai_note else msg
         total = (f"共 {res['total']:,} 件，显示前 {len(items)}:"
                  if res.get("total") else f"前 {len(items)}:")
         for it in items:
             it.setdefault("via", "")
-        return format_results(items, max_n=cfg.booth_limit, title=total)
+        out = format_results(items, max_n=cfg.booth_limit, title=total)
+        return f"{out}\n{ai_note}" if ai_note else out
 
     try:
         kws = await _ai_translate(hint)
     except Exception as e:
+        reason = vision.friendly_ai_error(e)
         logger.warning(f"AI 关键词翻译失败: {e}")
-        return f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
+        msg = f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
+        return f"{msg}\n⚠ AI 翻译不可用：{reason}"
     if not kws:
         return f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
     return _handle_text_sync(kws[0], adult=adult, query_label=" / ".join(kws[:3]))

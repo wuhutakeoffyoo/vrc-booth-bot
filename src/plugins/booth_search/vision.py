@@ -86,6 +86,44 @@ def parse_keywords(content: str) -> tuple[list, str]:
     return [p.strip(" -·*") for p in parts if len(p.strip(" -·*")) >= 2][:8], item_type
 
 
+def friendly_ai_error(e: Exception) -> str:
+    """把 AI 调用异常翻译成准确、可行动的中文反馈（给群友看的）。"""
+    if isinstance(e, httpx.HTTPStatusError):
+        code = e.response.status_code
+        body = ""
+        try:
+            body = (e.response.text or "")[:600].lower()
+        except Exception:
+            pass
+        if code == 402 or "insufficient" in body or "no balance" in body:
+            return ("AI 额度不足：账户按量余额不够（Go 套餐仅覆盖套餐内模型）。"
+                    "请到 opencode.ai 控制台充值，或换用套餐内模型")
+        if code == 429 or "usage limit" in body or "limit exceeded" in body:
+            if "5 hour" in body or "5h" in body or "hourly" in body:
+                return "AI 已达 Go 套餐 5 小时用量上限（$12），等窗口重置后自动恢复"
+            if "week" in body:
+                return "AI 已达 Go 套餐每周用量上限（$30），周一自动恢复"
+            if "month" in body or "monthly" in body:
+                return "AI 已达 Go 套餐每月用量上限（$60），次月自动恢复"
+            return "AI 请求被限流（429）：触发用量上限或请求过频，请稍后再试"
+        if code in (401,):
+            return "AI 认证失败：API key 无效或已过期，请检查 VISION_API_KEY"
+        if code == 403:
+            return "AI 请求被拦截（403）：key 无权限或触发安全策略，请检查账户套餐状态"
+        if code >= 500:
+            return f"AI 服务端错误（HTTP {code}）：OpenCode 上游故障，请稍后再试"
+        return f"AI 接口错误（HTTP {code}）"
+    if isinstance(e, httpx.TimeoutException):
+        return "AI 网络超时：OpenCode 响应过慢（模型繁忙），请稍后重试"
+    if isinstance(e, httpx.TransportError):
+        return "AI 网络异常：无法连接 OpenCode（DNS/连接失败），检查服务器网络"
+    if isinstance(e, RuntimeError) and "Insufficient" in str(e):
+        return "AI 额度不足：账户按量余额不够（CLI 后端），请充值或换 free 模型"
+    if isinstance(e, RuntimeError) and "超时" in str(e):
+        return "AI 处理超时：模型响应太慢，请稍后重试"
+    return f"AI 调用失败：{type(e).__name__}"
+
+
 def _api_content(resp_json: dict) -> str:
     """取模型回复文本；推理模型可能把内容放在 reasoning_content 或超长截断。"""
     choice = (resp_json.get("choices") or [{}])[0]
