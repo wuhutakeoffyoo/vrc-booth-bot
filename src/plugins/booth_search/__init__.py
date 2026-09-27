@@ -8,6 +8,7 @@
 图片流程：识图 AI 提取关键词（可配置，无 key 自动跳过）→ booth imgsearch 反查 +
 关键词搜索合并。文本流程：直接关键词搜索。
 """
+import asyncio
 import os
 import re
 import tempfile
