@@ -81,14 +81,23 @@ def _collect_image_urls(event: MessageEvent) -> list:
 
 
 async def _download_image(url: str) -> bytes:
-    """下载 QQ 消息里的图片（QQ 多媒体域名 + booth 图床都需要的话带上 Referer）。"""
+    """下载 QQ 消息里的图片；pximg CDN 偶发 5xx，带退避重试。"""
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://booth.pm/"}
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
-        if len(resp.content) < 100:
-            raise booth_client.BoothCliError("图片下载内容异常（过短）")
-        return resp.content
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                if len(resp.content) < 100:
+                    raise booth_client.BoothCliError("图片下载内容异常（过短）")
+                return resp.content
+        except httpx.HTTPStatusError as e:
+            last_err = e
+            if e.response.status_code < 500:
+                raise
+            await asyncio.sleep(1.5 * (attempt + 1))
+    raise last_err
 
 
 def _ai_backend() -> tuple[str, str]:

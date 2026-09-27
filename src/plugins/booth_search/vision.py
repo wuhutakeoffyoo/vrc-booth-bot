@@ -99,9 +99,13 @@ def _api_content(resp_json: dict) -> str:
 async def _api_post(url: str, payload: dict, api_key: str,
                     session_id: str = "", timeout: int = 60,
                     retries: int = 2) -> str:
-    """POST chat/completions，传输类错误（连接重置等）自动重试，返回回复文本。"""
+    """POST chat/completions，传输类错误自动重试，返回回复文本。
+    UA 用浏览器标识：Cloudflare WAF 会拦数据中心 IP + python 默认 UA 的大 body POST。"""
     headers = {"Authorization": f"Bearer {api_key}",
-               "x-opencode-session": _session_header(session_id)}
+               "x-opencode-session": _session_header(session_id),
+               "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/126.0.0.0 Safari/537.36")}
     async with httpx.AsyncClient(timeout=timeout) as client:
         for attempt in range(retries + 1):
             try:
