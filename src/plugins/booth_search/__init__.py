@@ -180,6 +180,7 @@ async def _handle_image(image_url: str, hint: str) -> str:
 
     # 2) CLI 反向图搜
     matches = []
+    derived = ""  # Bing 对图内日文标题的 OCR，常含正确词形
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tf:
@@ -190,8 +191,9 @@ async def _handle_image(image_url: str, hint: str) -> str:
             limit=cfg.booth_limit, cli_path=cfg.booth_cli_path,
             timeout=cfg.imgsearch_timeout)
         matches = data.get("matches") or []
-        if data.get("derived_query") and data["derived_query"] not in keywords:
-            keywords.append(data["derived_query"])
+        derived = (data.get("derived_query") or "").strip()
+        if derived and derived not in keywords:
+            keywords.append(derived)
     except booth_client.BoothCliError as e:
         logger.warning(f"图搜失败: {e}")
     finally:
@@ -201,32 +203,47 @@ async def _handle_image(image_url: str, hint: str) -> str:
             except OSError:
                 pass
 
-    # 3) 关键词搜索合并（图搜候选优先；前 3 个关键词都搜，召回 limit 提到 10）
+    # 3) 关键词搜索合并：图搜派生词提到搜索队列最前；视觉关键词随后的前 3 个也搜；
+    #    召回 limit 提到 10
+    search_kws = list(dict.fromkeys(
+        ([derived] if derived else []) + keywords))
+    low_all = [k.lower() for k in search_kws if k]
     seen = {m.get("id") for m in matches}
-    merged = list(matches)
-    if keywords:
-        recall_limit = max(cfg.booth_limit, 10)
-        for kw in keywords[:3]:
-            try:
-                res = booth_client.search(kw, limit=recall_limit,
-                                          sort=cfg.booth_sort, adult=cfg.r18_mode,
-                                          cli_path=cfg.booth_cli_path,
-                                          timeout=cfg.search_timeout)
-            except booth_client.BoothCliError as e:
-                logger.warning(f"关键词搜索失败({kw}): {e}")
-                continue
-            for it in res.get("items") or []:
-                if it["id"] not in seen:
-                    it["via"] = "关键词"
-                    seen.add(it["id"])
-                    merged.append(it)
+    kw_hits = []
+    recall_limit = max(cfg.booth_limit, 10)
+    for kw in search_kws[:3]:
+        try:
+            res = booth_client.search(kw, limit=recall_limit,
+                                      sort=cfg.booth_sort, adult=cfg.r18_mode,
+                                      cli_path=cfg.booth_cli_path,
+                                      timeout=cfg.search_timeout)
+        except booth_client.BoothCliError as e:
+            logger.warning(f"关键词搜索失败({kw}): {e}")
+            continue
+        for it in res.get("items") or []:
+            if it["id"] not in seen:
+                it["via"] = "关键词"
+                seen.add(it["id"])
+                kw_hits.append(it)
+    # 合并排序：图搜视觉候选 Top2 置前（最相关）→ 标题含关键词的命中 →
+    # 其余关键词命中 → 其余图搜候选（CLI 验证过的交错序）
+    def _rel(it):
+        name = (it.get("name") or "").lower()
+        return any(k in name for k in low_all)
+    kw_sorted = sorted(kw_hits, key=lambda it: not _rel(it))
+    merged = matches[:2] + kw_sorted + list(matches[2:])
+    dedup, seen2 = [], set()
+    for it in merged:
+        if it.get("id") not in seen2:
+            seen2.add(it.get("id"))
+            dedup.append(it)
 
-    if not merged:
+    if not dedup:
         msg = ("没找到相关 Booth 商品。识别关键词: "
-               + (" / ".join(keywords[:5]) or "（无）"))
+               + (" / ".join(search_kws[:5]) or "（无）"))
         return f"{msg}\n{ai_note}" if ai_note else msg
-    title = "识图关键词: " + (" / ".join(keywords[:5]) or "（无）") if keywords else "图搜结果:"
-    out = format_results(merged, max_n=cfg.booth_limit, title=title)
+    title = "识图关键词: " + (" / ".join(search_kws[:5]) or "（无）") if search_kws else "图搜结果:"
+    out = format_results(dedup, max_n=cfg.booth_limit, title=title)
     return f"{out}\n{ai_note}" if ai_note else out
 
 
@@ -250,6 +267,7 @@ def _handle_text_sync(hint: str, adult: str | None = None,
 
 def _search_merged(kws: list, adult: str | None = None) -> tuple[list, dict]:
     """按顺序搜索前 3 个关键词并合并去重（召回 limit 提到 10，展示层再截断）。
+    标题含任一关键词的候选置顶（稳定排序，对抗 popularity 淹没）。
     返回 (merged_items, first_res)。单个关键词失败跳过。"""
     cfg = plugin_config
     limit = max(cfg.booth_limit, 10)
@@ -270,6 +288,10 @@ def _search_merged(kws: list, adult: str | None = None) -> tuple[list, dict]:
                 it["via"] = "关键词"
                 seen.add(it["id"])
                 merged.append(it)
+    low_kws = [k.lower() for k in kws[:3] if k]
+    if low_kws:
+        merged.sort(key=lambda it: not any(
+            k in (it.get("name") or "").lower() for k in low_kws))
     return merged, first_res
 
 

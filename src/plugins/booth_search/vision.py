@@ -187,10 +187,16 @@ _TRANSLATE_PROMPT = (
 )
 
 _KANA_RE = re.compile(r"[\u3040-\u30ff]")
+# 简体字特有形（日文不用这些字形），用于混入片假名的外来语查询的中文判定
+_SIMPLIFIED_RE = re.compile(
+    "[们这说图搜贴价买卖现视频动发经过关软猫丝袜女饰宠头见听记应东车马语读谁错银钱购枪鲨浓妆补儿]")
 
 
 def _looks_chinese(text: str) -> bool:
-    """含假名 → 用户在用日语（否）；含汉字但无假名 → 视为中文需求。"""
+    """中文判定：先查简体字特有形（混片假名的中文查询也算中文），
+    再查假名（有假名无简体 → 日语），最后默认有汉字即中文。"""
+    if _SIMPLIFIED_RE.search(text):
+        return True
     if _KANA_RE.search(text):
         return False
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
@@ -199,18 +205,25 @@ def _looks_chinese(text: str) -> bool:
 async def translate_keywords(text: str, *, base_url: str, api_key: str,
                              model: str, session_id: str = "",
                              timeout: int = 60) -> list:
-    """中文需求 → 日语搜索关键词列表。HTTP/解析失败抛异常，由调用方退化。"""
+    """中文需求 → 日语搜索关键词列表。输出不含 JSON 时带强化指令重试一次；
+    HTTP/解析失败抛异常，由调用方退化。"""
     guard_api_base(base_url)
     url = base_url.rstrip("/") + "/chat/completions"
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": f"{_TRANSLATE_PROMPT}\n用户需求：{text}"}],
-        "temperature": 0.2,
-        "max_tokens": 2000,
-    }
-    content = await _api_post(url, payload, api_key, session_id, timeout)
-    kws, _ = parse_keywords(content)
-    return kws
+    prompt = f"{_TRANSLATE_PROMPT}\n用户需求：{text}"
+    for attempt in range(2):
+        payload = {
+            "model": model,
+            "messages": [{"role": "user",
+                          "content": prompt + ("\n（再次提醒：只输出 JSON 本体，"
+                                               "不要输出任何解释或思考过程）" if attempt else "")}],
+            "temperature": 0.2,
+            "max_tokens": 2000,
+        }
+        content = await _api_post(url, payload, api_key, session_id, timeout)
+        kws, _ = parse_keywords(content)
+        if kws and re.search(r"\{.*\}", content, re.S):
+            return kws
+    raise RuntimeError(f"翻译输出无法解析: {content[-160:]}")
 
 
 # ---------------------------------------------------------------- cli 后端
