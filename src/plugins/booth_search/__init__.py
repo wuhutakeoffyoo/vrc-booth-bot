@@ -91,21 +91,70 @@ async def _download_image(url: str) -> bytes:
         return resp.content
 
 
+def _ai_backend() -> tuple[str, str]:
+    """返回 (mode, resolved_param)。cli 模式返回 opencode 可执行文件路径；
+    api 模式返回第二个元素无意义。AI 整体不可用时返回 ("", "")。"""
+    cfg = plugin_config
+    if cfg.ai_mode == "cli":
+        try:
+            return "cli", vision.resolve_cli_bin(cfg.ai_cli_bin)
+        except RuntimeError as e:
+            logger.warning(f"opencode CLI 不可用: {e}")
+            return "", ""
+    if cfg.vision_api_key:
+        return "api", ""
+    return "", ""
+
+
+async def _ai_translate(text: str) -> list:
+    cfg = plugin_config
+    mode, param = _ai_backend()
+    if mode == "cli":
+        return await vision.translate_keywords_cli(
+            text, bin_path=param, model=cfg.ai_cli_model,
+            timeout=cfg.ai_cli_timeout)
+    return await vision.translate_keywords(
+        text, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
+        model=cfg.vision_model, timeout=cfg.vision_timeout)
+
+
+async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
+    cfg = plugin_config
+    mode, param = _ai_backend()
+    if mode == "cli":
+        return await vision.extract_keywords_cli(
+            image_path, hint=hint, bin_path=param,
+            model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
+    image_bytes = Path(image_path).read_bytes()
+    return await vision.extract_keywords(
+        image_bytes, hint=hint, base_url=cfg.vision_base_url,
+        api_key=cfg.vision_api_key, model=cfg.vision_model,
+        timeout=cfg.vision_timeout)
+
+
 async def _handle_image(image_url: str, hint: str) -> str:
     cfg = plugin_config
     image_bytes = await _download_image(image_url)
 
-    # 1) 识图 AI 提词（未配 key 则跳过，仅靠 CLI 自带派生词）
+    # 1) 识图 AI 提词（AI 不可用则跳过，仅靠 CLI 自带派生词）
     keywords, item_type = [], ""
-    if cfg.vision_api_key:
+    mode, _ = _ai_backend()
+    if mode:
+        tmp_for_ai = None
         try:
-            keywords, item_type = await vision.extract_keywords(
-                image_bytes, hint=hint, base_url=cfg.vision_base_url,
-                api_key=cfg.vision_api_key, model=cfg.vision_model,
-                timeout=cfg.vision_timeout)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tf:
+                tf.write(image_bytes)
+                tmp_for_ai = tf.name
+            keywords, item_type = await _ai_vision(tmp_for_ai, hint)
             logger.info(f"识图关键词: {keywords} (type={item_type})")
         except Exception as e:
             logger.warning(f"识图 AI 失败（退化为纯图搜）: {e}")
+        finally:
+            if tmp_for_ai:
+                try:
+                    os.unlink(tmp_for_ai)
+                except OSError:
+                    pass
 
     # 2) CLI 反向图搜
     matches = []
@@ -177,13 +226,12 @@ def _handle_text_sync(hint: str, adult: str | None = None,
 async def _handle_text(hint: str, adult: str | None = None) -> str:
     """文本搜索入口：中文需求先经 AI 翻译成日语关键词；直搜空结果也用 AI 重试。"""
     cfg = plugin_config
-    ai_ready = bool(cfg.vision_api_key)
+    ai_mode, _ = _ai_backend()
+    ai_ready = bool(ai_mode)
 
     if ai_ready and vision._looks_chinese(hint):
         try:
-            kws = await vision.translate_keywords(
-                hint, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
-                model=cfg.vision_model, timeout=cfg.vision_timeout)
+            kws = await _ai_translate(hint)
         except Exception as e:
             logger.warning(f"中文关键词 AI 翻译失败（用原词直搜）: {e}")
             kws = []
@@ -242,9 +290,7 @@ async def _handle_text(hint: str, adult: str | None = None) -> str:
         return format_results(items, max_n=cfg.booth_limit, title=total)
 
     try:
-        kws = await vision.translate_keywords(
-            hint, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
-            model=cfg.vision_model, timeout=cfg.vision_timeout)
+        kws = await _ai_translate(hint)
     except Exception as e:
         logger.warning(f"AI 关键词翻译失败: {e}")
         return f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"

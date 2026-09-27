@@ -1,12 +1,21 @@
-"""识图 AI 客户端：OpenAI 兼容 chat/completions 多模态接口（GLM / DeepSeek 等均可）。
+"""识图 AI 客户端：双后端。
+
+- cli: 本机 opencode CLI（`opencode run`，Go 套餐 free 模型可用，支持 -f 附图）
+- api: OpenAI 兼容 chat/completions 多模态接口（GLM / DeepSeek / Zen 按量模型）
 
 key 只从配置读取，本模块不落任何凭据。
 """
+import asyncio
 import base64
 import json
 import re
+import shutil
+import subprocess
+from pathlib import Path
 
 import httpx
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 # 提词目标：VRChat 素材（模型/衣装/髪型/配件/ギミック/テクスチャ/ツール）
 _VISION_PROMPT = (
@@ -107,3 +116,65 @@ async def translate_keywords(text: str, *, base_url: str, api_key: str,
         content = resp.json()["choices"][0]["message"]["content"]
     kws, _ = parse_keywords(content)
     return kws
+
+
+# ---------------------------------------------------------------- cli 后端
+
+def resolve_cli_bin(configured: str = "") -> str:
+    """定位 opencode 可执行文件；找不到抛 RuntimeError。"""
+    if configured:
+        if shutil.which(configured) or Path(configured).is_file():
+            return configured
+        raise RuntimeError(f"AI_CLI_BIN 指向的 opencode 不存在: {configured}")
+    found = shutil.which("opencode")
+    if found:
+        return found
+    raise RuntimeError("找不到 opencode CLI（PATH 与 AI_CLI_BIN 均未命中）")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text or "")
+
+
+def _cli_run_sync(bin_path: str, args: list, timeout: int) -> str:
+    """阻塞执行 opencode run，返回清理 ANSI 后的 stdout；失败抛 RuntimeError。
+
+    注意参数顺序：message 必须在 -f 之前（yargs 会把后续位置参数吞进 -f）。
+    """
+    try:
+        proc = subprocess.run(
+            [bin_path, "run"] + args,
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"opencode run 超时（>{timeout}s）")
+    if proc.returncode != 0:
+        tail = ((proc.stdout or "") + (proc.stderr or "")).strip()[-200:]
+        raise RuntimeError(f"opencode run 失败(exit {proc.returncode}): {tail}")
+    return _strip_ansi(proc.stdout)
+
+
+async def translate_keywords_cli(text: str, *, bin_path: str, model: str,
+                                 timeout: int = 90) -> list:
+    """CLI 后端：中文需求 → 日语关键词。输出必须含 JSON，否则视为失败。"""
+    prompt = f"{_TRANSLATE_PROMPT}\n用户需求：{text}"
+    out = await asyncio.to_thread(
+        _cli_run_sync, bin_path, ["-m", model, prompt], timeout)
+    if not re.search(r"\{.*\}", out, re.S):
+        raise RuntimeError(f"opencode 翻译输出不含 JSON: {out[-160:]}")
+    kws, _ = parse_keywords(out)
+    if not kws:
+        raise RuntimeError(f"opencode 翻译输出无法解析: {out[-160:]}")
+    return kws
+
+
+async def extract_keywords_cli(image_path: str, *, hint: str = "",
+                               bin_path: str, model: str,
+                               timeout: int = 90) -> tuple[list, str]:
+    """CLI 后端：识图提词（-f 附带图片文件）。"""
+    prompt = _VISION_PROMPT
+    if hint:
+        prompt += f"\n用户补充提示：{hint}"
+    out = await asyncio.to_thread(
+        _cli_run_sync, bin_path, ["-m", model, prompt, "-f", image_path], timeout)
+    return parse_keywords(out)

@@ -154,5 +154,56 @@ class TestVision(unittest.TestCase):
         self.assertIn("猫娘女仆装", captured["json"]["messages"][0]["content"])
 
 
+    def test_cli_backend_translate(self):
+        # mock subprocess：CLI 后端翻译（含 ANSI 清理与 JSON 提取）
+        import asyncio
+
+        class P:
+            returncode = 0
+            stdout = '\x1b[0m\n> build · mimo\n\x1b[0m\n{"keywords": ["猫耳", "メイド服"]}\n'
+            stderr = ""
+
+        def fake_run(cmd, **kw):
+            assert cmd[0] == "/fake/opencode" and cmd[1] == "run"
+            assert "-m" in cmd and "opencode/mimo-v2.6-flash-free" in cmd
+            return P()
+
+        with mock.patch("subprocess.run", fake_run):
+            kws = asyncio.run(vision.translate_keywords_cli(
+                "猫娘女仆装", bin_path="/fake/opencode",
+                model="opencode/mimo-v2.6-flash-free", timeout=30))
+        self.assertEqual(kws, ["猫耳", "メイド服"])
+
+    def test_cli_backend_failure_raises(self):
+        import asyncio
+
+        class P:
+            returncode = 1
+            stdout = ""
+            stderr = "Error: Upstream request failed: Insufficient account funds"
+
+        def fake_run(cmd, **kw):
+            return P()
+
+        with mock.patch("subprocess.run", fake_run):
+            with self.assertRaises(RuntimeError) as cm:
+                asyncio.run(vision.translate_keywords_cli(
+                    "x", bin_path="/fake/opencode", model="m", timeout=5))
+        self.assertIn("Insufficient", str(cm.exception))
+
+    def test_cli_backend_nonzero_json_missing(self):
+        import asyncio
+
+        class P:
+            returncode = 0
+            stdout = "\x1b[0m no json here"
+            stderr = ""
+
+        with mock.patch("subprocess.run", lambda cmd, **kw: P()):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(vision.translate_keywords_cli(
+                    "x", bin_path="/fake/opencode", model="m", timeout=5))
+
+
 if __name__ == "__main__":
     unittest.main()

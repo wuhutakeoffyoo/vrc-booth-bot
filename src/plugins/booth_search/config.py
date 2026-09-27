@@ -16,9 +16,15 @@ class Config(BaseModel):
     imgsearch_headless: bool = True    # 服务器环境务必 true
     imgsearch_timeout: int = 240
 
-    # 识图 AI（OpenAI 兼容 chat/completions；留空 key 则跳过 AI 提词）
+    # AI 后端：cli=本机 opencode CLI（Go 套餐 free 模型可用）| api=OpenAI 兼容 HTTP
+    ai_mode: str = "cli"
+    # cli 模式
+    ai_cli_bin: str = ""               # opencode 可执行文件路径（空则从 PATH 找）
+    ai_cli_model: str = "opencode/mimo-v2.6-flash-free"
+    ai_cli_timeout: int = 90
+    # api 模式（OpenAI 兼容 chat/completions；留空 key 则 AI 功能整体关闭）
     vision_api_key: str = ""
-    vision_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    vision_base_url: str = "https://opencode.ai/zen/v1"
     vision_model: str = "glm-5.3-flash"
     vision_timeout: int = 60
 
