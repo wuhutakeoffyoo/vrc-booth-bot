@@ -282,7 +282,7 @@ async def _handle_image(image_url: str, hint: str) -> dict:
         try:
             res = booth_client.search(kw, limit=recall_limit,
                                       sort=cfg.booth_sort, adult=cfg.r18_mode,
-                                      cli_path=cfg.booth_cli_path,
+                                      tag=(cfg.vrc_tag or None), cli_path=cfg.booth_cli_path,
                                       timeout=cfg.search_timeout)
         except booth_client.BoothCliError as e:
             logger.warning(f"关键词搜索失败({kw}): {e}")
@@ -323,7 +323,7 @@ def _handle_text_sync(hint: str, adult: str | None = None,
     sort, sort_note = _effective_sort(page)
     res = booth_client.search(hint, limit=cfg.booth_limit, sort=sort,
                               adult=adult or cfg.r18_mode, page=page,
-                              cli_path=cfg.booth_cli_path,
+                              tag=(cfg.vrc_tag or None), cli_path=cfg.booth_cli_path,
                               timeout=cfg.search_timeout)
     items = res.get("items") or []
     if not items:
@@ -362,7 +362,7 @@ def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[
         try:
             res = booth_client.search(kw, limit=limit, sort=sort,
                                       adult=adult or cfg.r18_mode, page=page,
-                                      cli_path=cfg.booth_cli_path,
+                                      tag=(cfg.vrc_tag or None), cli_path=cfg.booth_cli_path,
                                       timeout=cfg.search_timeout)
         except booth_client.BoothCliError as e:
             logger.warning(f"关键词搜索失败({kw}): {e}")
@@ -424,7 +424,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
     try:
         res = booth_client.search(hint, limit=cfg.booth_limit, sort=sort,
                                   adult=adult or cfg.r18_mode, page=page,
-                                  cli_path=cfg.booth_cli_path,
+                                  tag=(cfg.vrc_tag or None), cli_path=cfg.booth_cli_path,
                                   timeout=cfg.search_timeout)
     except booth_client.BoothCliError as e:
         logger.warning(f"原词直搜无结果({hint}): {e}")

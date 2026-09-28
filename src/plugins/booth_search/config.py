@@ -45,3 +45,6 @@ class Config(BaseModel):
     allow_private: bool = True
     # 搜索结果以 QQ 合并转发（转发消息，含商品图）发送；关闭则纯文本
     forward_messages: bool = True
+    # VRC 对口：所有关键词搜索自动附加 --tag VRChat，把结果收窄到 VRChat 商品圈
+    # （置空 vrc_tag 即关闭收窄）
+    vrc_tag: str = "VRChat"

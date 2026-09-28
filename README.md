@@ -1,14 +1,12 @@
-# booth-bot
+# vrc-booth-bot（VRC 对口）
 
-基于 [NoneBot2](https://nonebot.dev/) + OneBot v11（NapCat）的 QQ bot，接入
-[booth-cli](https://github.com/wuhutakeoffyoo/booth-cli) 提供 Booth.pm 商品搜索与
-以图搜图。**CLI 只留钩子（`booth bot` JSON 信封），bot 侧负责实现**——本项目即实现侧。
+基于 [NoneBot2](https://nonebot.dev/) + OneBot v11（NapCat）的 QQ bot，**专注 VRChat 素材圈**（VRC 对口）：接入 [booth-cli](https://github.com/wuhutakeoffyoo/booth-cli)，提供 Booth.pm 的 VRChat 商品搜索与以图搜图。关键词搜索自动附加 `--tag VRChat`（`VRC_TAG` 可关），结果收窄到 VRChat 商品圈。**CLI 只留钩子（`booth bot` JSON 信封），bot 侧负责实现**——本项目即实现侧。
 
 ## 功能
 
-- `/vrc search <关键词>` → 调 booth-cli 关键词搜索，返回 Top 结果（名称/价格/链接/店铺/R-18 标记）
+- `/vrc search <关键词>` → 调 booth-cli 关键词搜索（自动收窄 VRChat 圈），返回 Top 结果（名称/价格/链接/店铺/R-18 标记）；末尾数字为页码（如 `/vrc search 猫娘女仆装 2`）
 - `/vrc search` + 图片（或回复一张图片）→ 识图 AI 提取关键词 + booth-cli 反向图搜，
-  双路合并返回候选
+  双路合并返回候选（合并转发消息，每条附商品图）
 - R-18 过滤策略可配（`R18_MODE=include/exclude/only`）， adult 结果带标记展示
 
 ## 架构
