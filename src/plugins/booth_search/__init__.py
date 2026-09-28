@@ -355,6 +355,7 @@ def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[
     """按顺序搜索前 5 个单词级关键词并合并去重（召回 limit 提到 10，展示层再截断）。
     标题含任一关键词的候选置顶（稳定排序，对抗 popularity 淹没）。
     返回 (merged_items, first_res)。单个关键词失败跳过。"""
+    cfg = plugin_config
     sort, sort_note = _effective_sort(page)
     limit = max(cfg.booth_limit, 10)
     merged, seen, first_res = [], set(), {}
