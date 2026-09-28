@@ -25,6 +25,11 @@ from .format import format_results
 
 plugin_config = get_plugin_config(Config)
 
+
+class BoothUnavailable(RuntimeError):
+    """所有 AI 后端均不可用。"""
+
+
 SEARCH_RE = re.compile(r"^[/！!]?vrc\s*search(?:\s+(.*))?$", re.I | re.S)
 R18_RE = re.compile(r"^[/！!]?vrc\s*r18(?:\s+(.*))?$", re.I | re.S)
 USAGE = ("用法:\n/vrc search <关键词>   —— Booth 商品搜索\n"
@@ -117,7 +122,7 @@ def _ai_backend() -> tuple[str, str]:
 
 
 async def _ai_translate(text: str) -> list:
-    """api 失败时自动回落 cli 后端（free 模型），都失败抛最后一个异常。"""
+    """主 api（Go 套餐）→ 兜底 api（GLM Coding Plan）→ cli（mimo free）逐级回落。"""
     cfg = plugin_config
     mode, param = _ai_backend()
     if mode == "api":
@@ -127,14 +132,22 @@ async def _ai_translate(text: str) -> list:
                 model=cfg.vision_model, session_id=cfg.vision_session_id,
                 timeout=cfg.vision_timeout)
         except Exception as e:
-            logger.warning(f"api 后端失败，尝试 cli 兜底: {vision.friendly_ai_error(e)}")
+            logger.warning(f"主 api 失败，尝试 GLM Coding Plan 兜底: {vision.friendly_ai_error(e)}")
+        if cfg.fallback_api_key:
             try:
-                cli_bin = vision.resolve_cli_bin(cfg.ai_cli_bin)
-            except RuntimeError:
-                raise e
-            return await vision.translate_keywords_cli(
-                text, bin_path=cli_bin, model=cfg.ai_cli_model,
-                timeout=cfg.ai_cli_timeout)
+                return await vision.translate_keywords(
+                    text, base_url=cfg.fallback_base_url,
+                    api_key=cfg.fallback_api_key, model=cfg.fallback_model,
+                    timeout=cfg.vision_timeout)
+            except Exception as e:
+                logger.warning(f"GLM Coding Plan 兜底失败，尝试 cli: {vision.friendly_ai_error(e)}")
+        try:
+            cli_bin = vision.resolve_cli_bin(cfg.ai_cli_bin)
+        except RuntimeError as e:
+            raise BoothUnavailable(f"所有 AI 后端均不可用（主 api / 兜底 api / cli）: {e}")
+        return await vision.translate_keywords_cli(
+            text, bin_path=cli_bin, model=cfg.ai_cli_model,
+            timeout=cfg.ai_cli_timeout)
     return await vision.translate_keywords_cli(
         text, bin_path=param, model=cfg.ai_cli_model,
         timeout=cfg.ai_cli_timeout)
@@ -158,14 +171,30 @@ async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
                     session_id=cfg.vision_session_id, timeout=cfg.vision_timeout)
             return result
         except Exception as e:
-            logger.warning(f"api 后端失败，尝试 cli 兜底: {vision.friendly_ai_error(e)}")
+            logger.warning(f"主 api 失败，尝试 GLM Coding Plan 兜底: {vision.friendly_ai_error(e)}")
+        if cfg.fallback_api_key:
             try:
-                cli_bin = vision.resolve_cli_bin(cfg.ai_cli_bin)
-            except RuntimeError:
-                raise e
-            return await vision.extract_keywords_cli(
-                image_path, hint=hint, bin_path=cli_bin,
-                model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
+                image_bytes = Path(image_path).read_bytes()
+                result = await vision.extract_keywords(
+                    image_bytes, hint=hint, base_url=cfg.fallback_base_url,
+                    api_key=cfg.fallback_api_key, model=cfg.fallback_model,
+                    timeout=cfg.vision_timeout)
+                if not result[0]:
+                    logger.warning("兜底识图关键词为空，重试一次")
+                    result = await vision.extract_keywords(
+                        image_bytes, hint=hint, base_url=cfg.fallback_base_url,
+                        api_key=cfg.fallback_api_key, model=cfg.fallback_model,
+                        timeout=cfg.vision_timeout)
+                return result
+            except Exception as e:
+                logger.warning(f"GLM Coding Plan 兜底失败，尝试 cli: {vision.friendly_ai_error(e)}")
+        try:
+            cli_bin = vision.resolve_cli_bin(cfg.ai_cli_bin)
+        except RuntimeError as e:
+            raise BoothUnavailable(f"所有 AI 后端均不可用（主 api / 兜底 api / cli）: {e}")
+        return await vision.extract_keywords_cli(
+            image_path, hint=hint, bin_path=cli_bin,
+            model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
     return await vision.extract_keywords_cli(
         image_path, hint=hint, bin_path=param,
         model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)

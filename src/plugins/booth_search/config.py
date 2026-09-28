@@ -29,6 +29,11 @@ class Config(BaseModel):
     vision_model: str = "glm-5.3-flash"
     vision_session_id: str = ""        # x-opencode-session 头；空则每请求自动生成
     vision_timeout: int = 60
+    # 兜底 api（主 api 失败/额度耗尽时自动切换，OpenAI 兼容格式）
+    # GLM Coding Plan: https://open.bigmodel.cn/api/coding/paas/v4
+    fallback_api_key: str = ""
+    fallback_base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4"
+    fallback_model: str = "glm-5.3-flash"
 
     # 访问控制
     # 群白名单（空 = 不限制群；.env 示例: GROUP_WHITELIST='["111","222"]'，
