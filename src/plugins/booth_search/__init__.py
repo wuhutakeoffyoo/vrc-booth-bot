@@ -320,7 +320,8 @@ async def _handle_image(image_url: str, hint: str) -> dict:
 def _handle_text_sync(hint: str, adult: str | None = None,
                       query_label: str | None = None, page: int = 1) -> dict:
     cfg = plugin_config
-    res = booth_client.search(hint, limit=cfg.booth_limit, sort=cfg.booth_sort,
+    sort, sort_note = _effective_sort(page)
+    res = booth_client.search(hint, limit=cfg.booth_limit, sort=sort,
                               adult=adult or cfg.r18_mode, page=page,
                               cli_path=cfg.booth_cli_path,
                               timeout=cfg.search_timeout)
@@ -332,7 +333,7 @@ def _handle_text_sync(hint: str, adult: str | None = None,
         return {"text": text, "entries": []}
     total = f"共 {res['total']:,} 件，显示前 {len(items)}:" if res.get("total") else f"前 {len(items)}:"
     if page > 1:
-        total = f"「{hint}」第 {page} 页（共 {res.get('total') or 0:,} 件）:"
+        total = f"「{hint}」第 {page} 页（共 {res.get('total') or 0:,} 件）:{sort_note}"
     if query_label:
         total = f"{total}\nAI 关键词: {query_label}（原词「{hint}」）"
     for it in items:
@@ -341,16 +342,25 @@ def _handle_text_sync(hint: str, adult: str | None = None,
             "entries": items, "header": total}
 
 
+def _effective_sort(page: int) -> tuple[str, str]:
+    """返回 (实际排序, 标注)。Booth 在 popularity 排序下忽略 page 参数（站点行为），
+    翻页时自动改按新着排序以保证翻页有效。"""
+    cfg = plugin_config
+    if page > 1 and cfg.booth_sort == "popularity":
+        return "new", "（翻页按新着排序）"
+    return cfg.booth_sort, ""
+
+
 def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[list, dict]:
     """按顺序搜索前 5 个单词级关键词并合并去重（召回 limit 提到 10，展示层再截断）。
     标题含任一关键词的候选置顶（稳定排序，对抗 popularity 淹没）。
     返回 (merged_items, first_res)。单个关键词失败跳过。"""
-    cfg = plugin_config
+    sort, sort_note = _effective_sort(page)
     limit = max(cfg.booth_limit, 10)
     merged, seen, first_res = [], set(), {}
     for kw in kws[:5]:
         try:
-            res = booth_client.search(kw, limit=limit, sort=cfg.booth_sort,
+            res = booth_client.search(kw, limit=limit, sort=sort,
                                       adult=adult or cfg.r18_mode, page=page,
                                       cli_path=cfg.booth_cli_path,
                                       timeout=cfg.search_timeout)
@@ -368,6 +378,9 @@ def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[
     if low_kws:
         merged.sort(key=lambda it: not any(
             k in (it.get("name") or "").lower() for k in low_kws))
+    if sort_note:
+        first_res = dict(first_res or {})
+        first_res["sort_note"] = sort_note
     return merged, first_res
 
 
@@ -397,8 +410,9 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
             merged, res = _search_merged(kws, adult, page)
             if merged:
                 shown = min(len(merged), cfg.booth_limit)
-                header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}"
-                          if res.get("total") else f"前 {shown}:{page_note}")
+                sn = res.get("sort_note") or ""
+                header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
+                          if res.get("total") else f"前 {shown}:{page_note}{sn}")
                 header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
                 return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
                         "entries": merged, "header": header,
@@ -445,8 +459,9 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
                 f"AI 关键词（{' / '.join(kws[:3])}）也未命中")
         return {"text": text, "entries": []}
     shown = min(len(merged), cfg.booth_limit)
-    header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}"
-              if res.get("total") else f"前 {shown}:{page_note}")
+    sn = res.get("sort_note") or ""
+    header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
+              if res.get("total") else f"前 {shown}:{page_note}{sn}")
     header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
     for it in merged:
         it.setdefault("via", "")
