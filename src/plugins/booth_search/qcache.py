@@ -63,9 +63,9 @@ def put(key: str, payload: dict, ttl: int = DEFAULT_TTL,
         conn.execute("INSERT OR REPLACE INTO qcache (key, ts, payload) VALUES (?,?,?)",
                      (key, now, json.dumps(payload, ensure_ascii=False)))
         conn.execute("DELETE FROM qcache WHERE ts < ?", (now - ttl,))
-        conn.execute("DELETE FROM qcache WHERE key = ? NOT IN "
+        conn.execute("DELETE FROM qcache WHERE key NOT IN "
                      "(SELECT key FROM qcache ORDER BY ts DESC LIMIT ?)",
-                     (key, max_entries))
+                     (max_entries,))
         conn.commit()
     except sqlite3.Error:
         pass
