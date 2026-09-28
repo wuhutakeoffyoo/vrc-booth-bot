@@ -230,6 +230,52 @@ async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
         model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
 
 
+async def _enrich_entries(entries: list) -> None:
+    """为候选补全商品详情（收藏数/真实 tags，来自 item 详情接口）。
+    并发受限 3 路，单条失败静默跳过。"""
+    cfg = plugin_config
+    sem = asyncio.Semaphore(3)
+
+    async def one(it: dict):
+        async with sem:
+            try:
+                detail = await asyncio.to_thread(
+                    booth_client.item, it.get("id"),
+                    cli_path=cfg.booth_cli_path, timeout=cfg.search_timeout)
+            except Exception:
+                return
+            for k in ("wish_lists_count", "tags"):
+                v = detail.get(k)
+                if v:
+                    it[k] = v
+
+    await asyncio.gather(*[one(it) for it in entries])
+
+
+async def _webfind_entries(hint: str, kws: list) -> list:
+    """网络检索兜底：站内搜不到时从 DDG/Exa 找 booth.pm 商品链接并抓详情。"""
+    cfg = plugin_config
+    if not cfg.websearch_fallback:
+        return []
+    q = (kws[0] if kws else hint)
+    try:
+        ids = await webfind.find_booth_item_ids(
+            f"{q} Booth", exa_api_key=cfg.exa_api_key, timeout=15)
+    except Exception as e:
+        logger.warning(f"网络检索失败: {e}")
+        return []
+    entries = []
+    for iid in ids[:3]:
+        try:
+            it = booth_client.item(iid, cli_path=cfg.booth_cli_path,
+                                   timeout=cfg.search_timeout)
+            it["via"] = "网络检索"
+            entries.append(it)
+        except booth_client.BoothCliError:
+            continue
+    return entries
+
+
 async def _handle_image(image_url: str, hint: str) -> dict:
     cfg = plugin_config
     if image_url.startswith("file://"):
@@ -346,6 +392,7 @@ async def _handle_image(image_url: str, hint: str) -> dict:
                + (" / ".join(search_kws[:5]) or "（无）"))
         text = f"{msg}\n{ai_note}" if ai_note else msg
         return {"text": text, "entries": []}
+    await _enrich_entries(dedup)
     title = "识图关键词: " + (" / ".join(search_kws[:5]) or "（无）") if search_kws else "图搜结果:"
     text = format_results(dedup, max_n=cfg.booth_limit, title=title)
     if ai_note:

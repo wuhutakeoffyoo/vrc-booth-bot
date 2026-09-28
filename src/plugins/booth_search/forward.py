@@ -89,12 +89,21 @@ async def build_result_nodes(self_id: int, header: str, notes: list,
         if it.get("is_sold_out"):
             flags.append("已售罄")
         lines = [f"{i}. {it.get('name') or '(标题未知)'}  {price_str(it.get('price'))}"]
+        meta = []
+        wl = it.get("wish_lists_count")
+        if isinstance(wl, int) and wl > 0:
+            meta.append(f"♥ {wl:,} 收藏")
         if flags:
-            lines.append("[" + " | ".join(flags) + "]")
+            meta.append("[" + " | ".join(flags) + "]")
+        if meta:
+            lines.append("  " + "  ".join(meta))
         shop = (it.get("shop") or {}).get("name")
         if shop:
             cat = f" · {it['category']}" if it.get("category") else ""
             lines.append(f"店铺: {shop}{cat}")
+        tags = [t for t in (it.get("tags") or []) if t][:5]
+        if tags:
+            lines.append(" ".join("#" + str(t) for t in tags))
         url = it.get("url") or f"https://booth.pm/ja/items/{it.get('id')}"
         lines.append(url)
         segs = ([img] if img is not None else []) + [MessageSegment.text("\n".join(lines))]

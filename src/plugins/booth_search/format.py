@@ -26,6 +26,12 @@ def format_results(entries: list, max_n: int = 6, title: str = "") -> str:
         flag_s = f"  [{'|'.join(flags)}]" if flags else ""
         url = it.get("url") or f"https://booth.pm/ja/items/{it.get('id')}"
         lines.append(f"{i}. {it.get('name') or '(标题未知)'}  {price_str(it.get('price'))}{flag_s}")
+        wl = it.get("wish_lists_count")
+        if isinstance(wl, int) and wl > 0:
+            lines.append(f"   ♥ {wl:,} 收藏")
+        tags = [t for t in (it.get("tags") or []) if t][:5]
+        if tags:
+            lines.append("   " + " ".join("#" + str(t) for t in tags))
         lines.append(f"   {url}")
         shop = (it.get("shop") or {}).get("name")
         if shop:
