@@ -282,7 +282,7 @@ async def _handle_image(image_url: str, hint: str) -> dict:
             tmp_path = tf.name
         data = booth_client.imgsearch(
             tmp_path, headless=cfg.imgsearch_headless,
-            limit=cfg.booth_limit, cli_path=cfg.booth_cli_path,
+            limit=max(cfg.booth_limit, 10), cli_path=cfg.booth_cli_path,
             timeout=cfg.imgsearch_timeout)
         matches = data.get("matches") or []
         derived = (data.get("derived_query") or "").strip()
@@ -296,6 +296,14 @@ async def _handle_image(image_url: str, hint: str) -> dict:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+    # 视觉空转/无文字图：回忆兜底（模型 VRC 知识 + 派生词做描述）
+    if not keywords and cfg.recall_enabled:
+        desc = derived or hint or "VRChat 素材"
+        try:
+            keywords = [k for k in await _ai_recall(desc)][:2]
+            logger.info(f"回忆兜底关键词: {keywords}")
+        except Exception as e:
+            logger.warning(f"回忆兜底失败: {e}")
 
     # 3) 关键词搜索合并：图搜派生词提到搜索队列最前；视觉关键词随后的前 3 个也搜；
     #    召回 limit 提到 10
@@ -319,18 +327,19 @@ async def _handle_image(image_url: str, hint: str) -> dict:
                 it["via"] = "关键词"
                 seen.add(it["id"])
                 kw_hits.append(it)
-    # 合并排序：图搜视觉候选 Top2 置前（最相关）→ 标题含关键词的命中 →
-    # 其余关键词命中 → 其余图搜候选（CLI 验证过的交错序）
+    # 合并排序：图搜全量候选与关键词命中统一重排——标题含任一关键词（视觉词/
+    # 派生词/回忆词）的候选置顶（稳定排序），其余按原位次
     def _rel(it):
         name = (it.get("name") or "").lower()
         return any(k in name for k in low_all)
-    kw_sorted = sorted(kw_hits, key=lambda it: not _rel(it))
-    merged = matches[:2] + kw_sorted + list(matches[2:])
+    merged = list(matches) + kw_hits
     dedup, seen2 = [], set()
     for it in merged:
         if it.get("id") not in seen2:
             seen2.add(it.get("id"))
             dedup.append(it)
+    if low_all:
+        dedup.sort(key=lambda it: not _rel(it))
 
     if not dedup:
         msg = ("没找到相关 Booth 商品。识别关键词: "
