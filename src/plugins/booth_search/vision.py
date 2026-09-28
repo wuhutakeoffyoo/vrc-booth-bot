@@ -101,6 +101,7 @@ def expand_reading_variants(keywords: list) -> list:
        连写复合词必须整词命中）。"""
     out = []
     seen = set()
+    seen_readings = set()
     try:
         import pykakasi
         kks = pykakasi.kakasi()
@@ -109,9 +110,12 @@ def expand_reading_variants(keywords: list) -> list:
     except ImportError:
         conv = None
     for kw in keywords:
+        kw_reading = conv.do(kw) if conv is not None else kw
+        if kw_reading in seen_readings:
+            continue  # 同读音关键词（リング/指輪/ゆびわ 类）只保留首个，节省槽位
         forms = [kw]
         if conv is not None:
-            forms.append(conv.do(kw))
+            forms.append(kw_reading)
         if " " in kw:
             forms.append(kw.replace(" ", ""))
         for form in forms:
@@ -119,15 +123,19 @@ def expand_reading_variants(keywords: list) -> list:
             if form and form not in seen:
                 seen.add(form)
                 out.append(form)
+        seen_readings.add(kw_reading)
     return out
 
 
 def _is_reasoning_prose(text: str) -> bool:
     """识别推理模型泄漏的思考过程文本（非关键词）。"""
-    if len(text) > 30 or "..." in text:
+    if len(text) > 30 or "..." in text or text.rstrip().endswith(")"):
         return True
     lowered = text.lower()
-    return lowered.startswith(("let me", "the image", "this image", "i ", "分析", "图中"))
+    if lowered.startswith(("let me", "the image", "this image", "i ", "分析", "图中",
+                           "also ", "a character", "note:", "usage")):
+        return True
+    return "common in" in lowered or "character name" in lowered
 
 
 def friendly_ai_error(e: Exception) -> str:

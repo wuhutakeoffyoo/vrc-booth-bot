@@ -146,10 +146,17 @@ async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
     if mode == "api":
         try:
             image_bytes = Path(image_path).read_bytes()
-            return await vision.extract_keywords(
+            result = await vision.extract_keywords(
                 image_bytes, hint=hint, base_url=cfg.vision_base_url,
                 api_key=cfg.vision_api_key, model=cfg.vision_model,
                 session_id=cfg.vision_session_id, timeout=cfg.vision_timeout)
+            if not result[0]:  # 空关键词（推理模型偶发空转）自动重试一次
+                logger.warning("识图关键词为空，重试一次")
+                result = await vision.extract_keywords(
+                    image_bytes, hint=hint, base_url=cfg.vision_base_url,
+                    api_key=cfg.vision_api_key, model=cfg.vision_model,
+                    session_id=cfg.vision_session_id, timeout=cfg.vision_timeout)
+            return result
         except Exception as e:
             logger.warning(f"api 后端失败，尝试 cli 兜底: {vision.friendly_ai_error(e)}")
             try:
@@ -330,7 +337,10 @@ async def _handle_text(hint: str, adult: str | None = None) -> dict:
     ai_ready = bool(ai_mode)
     ai_note = ""  # AI 不可用时的用户反馈行
 
-    if ai_ready and vision._looks_chinese(hint):
+    if (ai_ready and vision._looks_chinese(hint)
+            and not re.search(r"[A-Za-z]{4,}", hint)):
+        # 含 4 字以上拉丁词（商品原名/罗马字）时不走翻译——百样本实测原词直搜
+        # 命中率远高于 AI 翻译（Top1 5/7 vs 0），翻译仅作空结果兜底
         try:
             kws = await _ai_translate(hint)
             kws = vision.expand_reading_variants(kws)  # 汉字词追加假名读音变体
