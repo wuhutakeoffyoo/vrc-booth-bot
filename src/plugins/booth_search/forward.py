@@ -17,9 +17,22 @@ def entry_image_url(it: dict) -> str | None:
     return it.get("image") or ((it.get("images") or [None])[0])
 
 
+def _thumb_url(url: str | None) -> str | None:
+    """pximg 原图转 300x300 缩略图（原图多 MB 会导致 base64 发送失败/极慢）。"""
+    if not url:
+        return url
+    if ("booth.pximg.net" in url and url.endswith(".jpg")
+            and "/c/" not in url):
+        stem = url[:-4]
+        return stem.replace("booth.pximg.net/", "booth.pximg.net/c/300x300_a2_g5/", 1) \
+            + "_base_resized.jpg"
+    return url
+
+
 async def _image_segment(url: str | None, sem: asyncio.Semaphore):
     if not url:
         return None
+    url = _thumb_url(url)
     async with sem:
         for attempt in range(2):
             try:
@@ -45,16 +58,25 @@ def _node(self_id: int, nickname: str, segments: list) -> dict:
 
 async def build_result_nodes(self_id: int, header: str, notes: list,
                              entries: list, max_n: int = 6,
-                             nickname: str = "Booth 搜索") -> list:
-    """构建转发节点：首个节点为摘要（查询/关键词/告警），其后每个商品一节点（图+文字）。"""
+                             nickname: str = "Booth 搜索",
+                             page: int = 1, query_hint: str = "",
+                             total: int | None = None) -> list:
+    """构建转发节点：摘要节点（含翻页提示）+ 每商品一节点（图+文字）。"""
     sem = asyncio.Semaphore(3)
     top = entries[:max_n]
     imgs = await asyncio.gather(
         *[_image_segment(entry_image_url(it), sem) for it in top])
 
-    head_segs = [MessageSegment.text(header)]
+    head_lines = [header]
     for note in notes:
-        head_segs.append(MessageSegment.text("\n" + note))
+        head_lines.append(note)
+    # 翻页提示：还有更多结果时提示页码指令
+    if total and total > page * max_n:
+        if query_hint:
+            head_lines.append(f"翻下一页：/vrc search {query_hint} {page + 1}")
+        else:
+            head_lines.append(f"翻下一页：/vrc search <关键词> {page + 1}")
+    head_segs = [MessageSegment.text("\n".join(head_lines))]
     nodes = [_node(self_id, nickname, head_segs)]
 
     from .format import price_str

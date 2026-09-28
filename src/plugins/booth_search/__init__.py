@@ -298,7 +298,7 @@ async def _handle_image(image_url: str, hint: str) -> dict:
                 pass
     # 视觉空转/无文字图：回忆兜底（模型 VRC 知识 + 派生词做描述）
     if not keywords and cfg.recall_enabled:
-        desc = derived or hint or "VRChat 素材"
+        desc = hint or derived or "VRChat 素材"
         try:
             keywords = [k for k in await _ai_recall(desc)][:2]
             logger.info(f"回忆兜底关键词: {keywords}")
@@ -308,7 +308,7 @@ async def _handle_image(image_url: str, hint: str) -> dict:
     # 3) 关键词搜索合并：图搜派生词提到搜索队列最前；视觉关键词随后的前 3 个也搜；
     #    召回 limit 提到 10
     search_kws = list(dict.fromkeys(
-        ([derived] if derived else []) + keywords))
+        ([hint] if hint else []) + ([derived] if derived else []) + keywords))
     low_all = [k.lower() for k in search_kws if k]
     seen = {m.get("id") for m in matches}
     kw_hits = []
@@ -375,7 +375,8 @@ def _handle_text_sync(hint: str, adult: str | None = None,
     for it in items:
         it.setdefault("via", "")
     return {"text": format_results(items, max_n=cfg.booth_limit, title=total),
-            "entries": items, "header": total}
+            "entries": items, "header": total,
+            "page": page, "qhint": hint, "total": res.get("total")}
 
 
 def _effective_sort(page: int) -> tuple[str, str]:
@@ -482,7 +483,8 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
                 header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
                 return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
                         "entries": merged, "header": header,
-                        "notes": [ai_note] if ai_note else []}
+                        "notes": [ai_note] if ai_note else [],
+                        "page": page, "qhint": hint, "total": res.get("total")}
 
     # 原词直搜；中文路径无果时不再重复翻译，非中文空结果走 AI 关键词重试
     sort, sort_note = _effective_sort(page)
