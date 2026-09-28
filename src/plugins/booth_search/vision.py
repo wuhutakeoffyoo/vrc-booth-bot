@@ -132,10 +132,12 @@ def _is_reasoning_prose(text: str) -> bool:
     if len(text) > 30 or "..." in text or text.rstrip().endswith(")"):
         return True
     lowered = text.lower()
-    if lowered.startswith(("let me", "the image", "this image", "i ", "分析", "图中",
+    if lowered.startswith(("let me", "the image", "this image", "from the image",
+                           "text visible", "i ", "i can", "分析", "图中", "画面中",
                            "also ", "a character", "note:", "usage")):
         return True
-    return "common in" in lowered or "character name" in lowered
+    return ("common in" in lowered or "character name" in lowered
+            or "i can see" in lowered or "text visible" in lowered)
 
 
 def friendly_ai_error(e: Exception) -> str:
