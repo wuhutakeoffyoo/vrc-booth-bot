@@ -244,7 +244,7 @@ async def _enrich_entries(entries: list) -> None:
                     cli_path=cfg.booth_cli_path, timeout=cfg.search_timeout)
             except Exception:
                 return
-            for k in ("wish_lists_count", "tags"):
+            for k in ("wish_lists_count", "tags", "published_at"):
                 v = detail.get(k)
                 if v:
                     it[k] = v
@@ -392,7 +392,7 @@ async def _handle_image(image_url: str, hint: str) -> dict:
                + (" / ".join(search_kws[:5]) or "（无）"))
         text = f"{msg}\n{ai_note}" if ai_note else msg
         return {"text": text, "entries": []}
-    await _enrich_entries(dedup)
+    await _enrich_entries(dedup[:cfg.booth_limit])
     title = "识图关键词: " + (" / ".join(search_kws[:5]) or "（无）") if search_kws else "图搜结果:"
     text = format_results(dedup, max_n=cfg.booth_limit, title=title)
     if ai_note:
@@ -435,15 +435,13 @@ def _effective_sort(page: int) -> tuple[str, str]:
     return cfg.booth_sort, ""
 
 
-def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[list, dict]:
-    """按顺序搜索前 5 个单词级关键词并合并去重（召回 limit 提到 10，展示层再截断）。
-    标题含任一关键词的候选置顶（稳定排序，对抗 popularity 淹没）。
+async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[list, dict]:
+    """分词搜索（3 路并发）：Booth AND 分词对多词短语脆弱，单词级检索词命中率最高；
+    连写形（ショコラドレス）整词保留。标题含词的候选置顶。
     返回 (merged_items, first_res)。单个关键词失败跳过。"""
     cfg = plugin_config
     sort, sort_note = _effective_sort(page)
     limit = max(cfg.booth_limit, 10)
-    # 分词搜索：Booth AND 分词对多词短语脆弱，单词级检索词命中率最高；
-    # 连写形（ショコラドレス）整词保留。共 6 个检索词。
     terms, seen_t = [], set()
     for kw in kws[:6]:
         for tok in re.split(r"[\s/、，,]+", str(kw)):
@@ -456,14 +454,23 @@ def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[
             seen_t.add(whole)
             terms.append(whole)
     merged, seen, first_res = [], set(), {}
-    for kw in terms[:6]:
-        try:
-            res = booth_client.search(kw, limit=limit, sort=sort,
-                                      adult=adult or cfg.r18_mode, page=page,
-                                      tag=(cfg.vrc_tag or None), cli_path=cfg.booth_cli_path,
-                                      timeout=cfg.search_timeout)
-        except booth_client.BoothCliError as e:
-            logger.warning(f"关键词搜索失败({kw}): {e}")
+    sem = asyncio.Semaphore(3)
+
+    async def _one(kw):
+        async with sem:
+            try:
+                return await asyncio.to_thread(
+                    booth_client.search, kw, limit=limit, sort=sort,
+                    adult=adult or cfg.r18_mode, page=page,
+                    tag=(cfg.vrc_tag or None), cli_path=cfg.booth_cli_path,
+                    timeout=cfg.search_timeout)
+            except booth_client.BoothCliError as e:
+                logger.warning(f"关键词搜索失败({kw}): {e}")
+                return None
+
+    results = await asyncio.gather(*[_one(kw) for kw in terms[:6]])
+    for res in results:
+        if res is None:
             continue
         if not first_res:
             first_res = res
@@ -521,7 +528,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
         rk = [k for k in rk_raw if k.lower() not in {x.lower() for x in kws0}][:2]
         kws = vision.expand_reading_variants(rk + kws0)
         if kws:
-            merged, res = _search_merged(kws, adult, page)
+            merged, res = await _search_merged(kws, adult, page)
             if merged:
                 shown = min(len(merged), cfg.booth_limit)
                 sn = res.get("sort_note") or ""
@@ -574,7 +581,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
     if not kws:
         return {"text": f"Booth 上没搜到「{hint}」{page_note}（共 {res.get('total') or 0} 件）",
                 "entries": []}
-    merged, res = _search_merged(kws, adult, page)
+    merged, res = await _search_merged(kws, adult, page)
     if not merged:
         web_entries = await _webfind_entries(hint, kws)
         if web_entries:

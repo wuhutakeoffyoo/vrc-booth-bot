@@ -29,6 +29,9 @@ def format_results(entries: list, max_n: int = 6, title: str = "") -> str:
         wl = it.get("wish_lists_count")
         if isinstance(wl, int) and wl > 0:
             lines.append(f"   ♥ {wl:,} 收藏")
+        pub = str(it.get("published_at") or "")[:10]
+        if pub:
+            lines.append(f"   上架 {pub}")
         tags = [t for t in (it.get("tags") or []) if t][:5]
         if tags:
             lines.append("   " + " ".join("#" + str(t) for t in tags))

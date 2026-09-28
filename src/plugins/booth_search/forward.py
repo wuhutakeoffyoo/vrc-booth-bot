@@ -93,6 +93,9 @@ async def build_result_nodes(self_id: int, header: str, notes: list,
         wl = it.get("wish_lists_count")
         if isinstance(wl, int) and wl > 0:
             meta.append(f"♥ {wl:,} 收藏")
+        pub = str(it.get("published_at") or "")[:10]
+        if pub:
+            meta.append(f"上架 {pub}")
         if flags:
             meta.append("[" + " | ".join(flags) + "]")
         if meta:
