@@ -75,3 +75,10 @@ python -m unittest discover -s tests   # 纯逻辑单测（CLI 信封封装/格�
 ```
 
 端到端需要 NapCat + QQ 环境，服务器部署步骤见 PROXY_DEPLOYMENT.md。
+
+## 开源说明
+
+- 许可证：MIT（见 [LICENSE](LICENSE)）
+- 本项目为个人工具，与 BOOTH/pixiv 官方无关联；使用时请遵守 Booth 利用条款（请求间隔 ≥1 秒，勿高并发）
+- 无任何凭据入库：API key、QQ 账号等均通过 `.env` 本地配置
+- 欢迎 Issue/PR；涉及部署（服务器/NapCat）的通用问题优先提 Issue
