@@ -292,13 +292,13 @@ def _handle_text_sync(hint: str, adult: str | None = None,
 
 
 def _search_merged(kws: list, adult: str | None = None) -> tuple[list, dict]:
-    """按顺序搜索前 4 个关键词（含读音变体）并合并去重（召回 limit 提到 10，
-    展示层再截断）。标题含任一关键词的候选置顶（稳定排序，对抗 popularity 淹没）。
+    """按顺序搜索前 5 个单词级关键词并合并去重（召回 limit 提到 10，展示层再截断）。
+    标题含任一关键词的候选置顶（稳定排序，对抗 popularity 淹没）。
     返回 (merged_items, first_res)。单个关键词失败跳过。"""
     cfg = plugin_config
     limit = max(cfg.booth_limit, 10)
     merged, seen, first_res = [], set(), {}
-    for kw in kws[:4]:
+    for kw in kws[:5]:
         try:
             res = booth_client.search(kw, limit=limit, sort=cfg.booth_sort,
                                       adult=adult or cfg.r18_mode,
