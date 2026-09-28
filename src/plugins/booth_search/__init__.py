@@ -605,21 +605,27 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
             "entries": merged, "header": header}
 
 
-async def _send_result(bot, event, result: dict):
+async def _send_result(bot, event, result: dict, from_cache: bool = False):
     """优先合并转发（含商品图），失败或无条目时回退纯文本。"""
     cfg = plugin_config
     entries = result.get("entries") or []
+    header = result.get("header") or ""
+    if from_cache and header:
+        header = header + chr(92) + "n（缓存结果，可能非最新）"
     if cfg.forward_messages and entries:
         try:
             nodes = await forward.build_result_nodes(
-                int(bot.self_id), result.get("header") or "",
+                int(bot.self_id), header,
                 result.get("notes") or [], entries, max_n=cfg.booth_limit)
         except Exception as e:
             logger.warning(f"转发节点构建失败: {e}")
             nodes = None
         if nodes and await forward.send(bot, event, nodes):
             return
-    await matcher.finish(result["text"])
+    text = result["text"]
+    if from_cache and result.get("header"):
+        text = "(缓存结果，可能非最新)" + chr(92) + "n" + text
+    await matcher.finish(text)
 
 
 @matcher.handle()
@@ -637,6 +643,16 @@ async def handle_vrc_search(bot, event: MessageEvent):
     if not urls and not hint:
         await matcher.finish(USAGE)
 
+    # 查询缓存：相同查询（模式/页码/词）在 TTL 内直接回缓存结果，省 AI 额度
+    cache_key = qcache.make_key("search", cfg.r18_mode, page,
+                                hint, urls[0] if urls else "")
+    cached = (qcache.get(cache_key, plugin_config.query_cache_ttl)
+              if plugin_config.query_cache_ttl > 0 and not urls else None)
+    if cached is not None:
+        logger.info(f"查询缓存命中: {cache_key[:60]}")
+        await _send_result(bot, event, cached, from_cache=True)
+        return
+
     try:
         if urls:
             if not hint:
@@ -652,6 +668,9 @@ async def handle_vrc_search(bot, event: MessageEvent):
     except Exception as e:
         logger.exception("vrc search 未捕获异常")
         result = {"text": f"内部错误: {type(e).__name__}: {e}", "entries": []}
+    if result.get("entries") and plugin_config.query_cache_ttl > 0:
+        qcache.put(cache_key, result, ttl=plugin_config.query_cache_ttl,
+                   max_entries=plugin_config.query_cache_max)
     await _send_result(bot, event, result)
 
 
@@ -669,6 +688,12 @@ async def handle_vrc_r18(bot, event: MessageEvent):
     hint, page = _split_page(hint)
     if not hint:
         await r18_matcher.finish("用法: /vrc r18 <关键词>（R-18 专项搜索，仅管理员）")
+    cache_key = qcache.make_key("r18", page, hint)
+    cached = (qcache.get(cache_key, plugin_config.query_cache_ttl)
+              if plugin_config.query_cache_ttl > 0 else None)
+    if cached is not None:
+        await _send_result(bot, event, cached, from_cache=True)
+        return
     try:
         result = await _handle_text(hint, adult="only", page=page)
     except booth_client.BoothCliError as e:
@@ -676,4 +701,7 @@ async def handle_vrc_r18(bot, event: MessageEvent):
     except Exception as e:
         logger.exception("vrc r18 未捕获异常")
         result = {"text": f"内部错误: {type(e).__name__}: {e}", "entries": []}
+    if result.get("entries") and plugin_config.query_cache_ttl > 0:
+        qcache.put(cache_key, result, ttl=plugin_config.query_cache_ttl,
+                   max_entries=plugin_config.query_cache_max)
     await _send_result(bot, event, result)
