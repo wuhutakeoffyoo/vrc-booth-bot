@@ -420,8 +420,9 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
 
     # 原词直搜；空结果且 AI 可用时翻译重试
     # （中文词在 Booth 常返回空搜索页，CLI 会抛 BoothCliError，按空结果处理）
+    sort, sort_note = _effective_sort(page)
     try:
-        res = booth_client.search(hint, limit=cfg.booth_limit, sort=cfg.booth_sort,
+        res = booth_client.search(hint, limit=cfg.booth_limit, sort=sort,
                                   adult=adult or cfg.r18_mode, page=page,
                                   cli_path=cfg.booth_cli_path,
                                   timeout=cfg.search_timeout)
@@ -433,8 +434,8 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
         if not items:
             msg = f"Booth 上没搜到「{hint}」{page_note}（共 {res.get('total') or 0} 件）"
             return {"text": f"{msg}\n{ai_note}" if ai_note else msg, "entries": []}
-        total = (f"共 {res['total']:,} 件，显示前 {len(items)}:{page_note}"
-                 if res.get("total") else f"前 {len(items)}:{page_note}")
+        total = (f"共 {res['total']:,} 件，显示前 {len(items)}:{page_note}{sort_note}"
+                 if res.get("total") else f"前 {len(items)}:{page_note}{sort_note}")
         for it in items:
             it.setdefault("via", "")
         text = format_results(items, max_n=cfg.booth_limit, title=total)
