@@ -58,5 +58,26 @@ class TestAccessControl(unittest.TestCase):
         self.assertTrue(access.access_ok(cfg, user_id=100, group_id=12345))
 
 
+class TestSplitPage(unittest.TestCase):
+    """页码剥离（导入插件包需 nonebot 已 init，故放在本文件）。"""
+
+    def _bs(self):
+        import booth_search as bs  # noqa: E402  # 插件包导入会注册 matcher
+        return bs
+
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "plugins"))
+
+    def test_split_page(self):
+        bs = self._bs()
+        self.assertEqual(bs._split_page("猫娘女仆装 2"), ("猫娘女仆装", 2))
+        self.assertEqual(bs._split_page("シエル 12"), ("シエル", 12))
+        self.assertEqual(bs._split_page("猫娘女仆装"), ("猫娘女仆装", 1))
+        self.assertEqual(bs._split_page("2"), ("2", 1))          # 纯数字=关键词本身
+        self.assertEqual(bs._split_page("Bloom Phone"), ("Bloom Phone", 1))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -32,9 +32,19 @@ class BoothUnavailable(RuntimeError):
 
 SEARCH_RE = re.compile(r"^[/！!]?vrc\s*search(?:\s+(.*))?$", re.I | re.S)
 R18_RE = re.compile(r"^[/！!]?vrc\s*r18(?:\s+(.*))?$", re.I | re.S)
+PAGE_RE = re.compile(r"^(.*?\S)\s+(\d{1,3})$")
 USAGE = ("用法:\n/vrc search <关键词>   —— Booth 商品搜索\n"
+         "/vrc search <关键词> <页码> —— 翻页（如 /vrc search 猫娘女仆装 2）\n"
          "/vrc search + 图片     —— 以图搜图（可附文字提示）")
 DENY_MSG = "该指令仅对管理员开放"
+
+
+def _split_page(text: str) -> tuple[str, int]:
+    """查询末尾的独立数字（1-3 位）作为页码剥出；无则第 1 页。"""
+    m = PAGE_RE.match(text)
+    if m and m.group(1).strip():
+        return m.group(1).strip(), max(1, int(m.group(2)))
+    return text, 1
 
 
 def _plain(event) -> str:
@@ -308,17 +318,21 @@ async def _handle_image(image_url: str, hint: str) -> dict:
 
 
 def _handle_text_sync(hint: str, adult: str | None = None,
-                      query_label: str | None = None) -> dict:
+                      query_label: str | None = None, page: int = 1) -> dict:
     cfg = plugin_config
     res = booth_client.search(hint, limit=cfg.booth_limit, sort=cfg.booth_sort,
-                              adult=adult or cfg.r18_mode,
+                              adult=adult or cfg.r18_mode, page=page,
                               cli_path=cfg.booth_cli_path,
                               timeout=cfg.search_timeout)
     items = res.get("items") or []
     if not items:
-        text = f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
+        text = (f"Booth 上没搜到「{hint}」第 {page} 页（共 {res.get('total') or 0} 件）"
+                if page > 1 else
+                f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）")
         return {"text": text, "entries": []}
     total = f"共 {res['total']:,} 件，显示前 {len(items)}:" if res.get("total") else f"前 {len(items)}:"
+    if page > 1:
+        total = f"「{hint}」第 {page} 页（共 {res.get('total') or 0:,} 件）:"
     if query_label:
         total = f"{total}\nAI 关键词: {query_label}（原词「{hint}」）"
     for it in items:
@@ -327,7 +341,7 @@ def _handle_text_sync(hint: str, adult: str | None = None,
             "entries": items, "header": total}
 
 
-def _search_merged(kws: list, adult: str | None = None) -> tuple[list, dict]:
+def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[list, dict]:
     """按顺序搜索前 5 个单词级关键词并合并去重（召回 limit 提到 10，展示层再截断）。
     标题含任一关键词的候选置顶（稳定排序，对抗 popularity 淹没）。
     返回 (merged_items, first_res)。单个关键词失败跳过。"""
@@ -337,7 +351,7 @@ def _search_merged(kws: list, adult: str | None = None) -> tuple[list, dict]:
     for kw in kws[:5]:
         try:
             res = booth_client.search(kw, limit=limit, sort=cfg.booth_sort,
-                                      adult=adult or cfg.r18_mode,
+                                      adult=adult or cfg.r18_mode, page=page,
                                       cli_path=cfg.booth_cli_path,
                                       timeout=cfg.search_timeout)
         except booth_client.BoothCliError as e:
@@ -357,11 +371,12 @@ def _search_merged(kws: list, adult: str | None = None) -> tuple[list, dict]:
     return merged, first_res
 
 
-async def _handle_text(hint: str, adult: str | None = None) -> dict:
+async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> dict:
     """文本搜索入口：中文需求先经 AI 翻译成日语关键词；直搜空结果也用 AI 重试。
-    AI 失败时给用户准确原因，并注明已退化为原词直搜。
+    AI 失败时给用户准确原因，并注明已退化为原词直搜。page 为结果页码。
     返回 {"text", "entries", "header", "notes"}。"""
     cfg = plugin_config
+    page_note = f"（第 {page} 页）" if page > 1 else ""
     ai_mode, _ = _ai_backend()
     ai_ready = bool(ai_mode)
     ai_note = ""  # AI 不可用时的用户反馈行
@@ -379,11 +394,11 @@ async def _handle_text(hint: str, adult: str | None = None) -> dict:
             kws = []
             ai_note = f"⚠ AI 翻译不可用：{reason}（已用原词直搜）"
         if kws:
-            merged, res = _search_merged(kws, adult)
+            merged, res = _search_merged(kws, adult, page)
             if merged:
                 shown = min(len(merged), cfg.booth_limit)
-                header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:"
-                          if res.get("total") else f"前 {shown}:")
+                header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}"
+                          if res.get("total") else f"前 {shown}:{page_note}")
                 header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
                 return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
                         "entries": merged, "header": header,
@@ -393,7 +408,7 @@ async def _handle_text(hint: str, adult: str | None = None) -> dict:
     # （中文词在 Booth 常返回空搜索页，CLI 会抛 BoothCliError，按空结果处理）
     try:
         res = booth_client.search(hint, limit=cfg.booth_limit, sort=cfg.booth_sort,
-                                  adult=adult or cfg.r18_mode,
+                                  adult=adult or cfg.r18_mode, page=page,
                                   cli_path=cfg.booth_cli_path,
                                   timeout=cfg.search_timeout)
     except booth_client.BoothCliError as e:
@@ -402,10 +417,10 @@ async def _handle_text(hint: str, adult: str | None = None) -> dict:
     if (res.get("items") or []) or not ai_ready:
         items = res.get("items") or []
         if not items:
-            msg = f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
+            msg = f"Booth 上没搜到「{hint}」{page_note}（共 {res.get('total') or 0} 件）"
             return {"text": f"{msg}\n{ai_note}" if ai_note else msg, "entries": []}
-        total = (f"共 {res['total']:,} 件，显示前 {len(items)}:"
-                 if res.get("total") else f"前 {len(items)}:")
+        total = (f"共 {res['total']:,} 件，显示前 {len(items)}:{page_note}"
+                 if res.get("total") else f"前 {len(items)}:{page_note}")
         for it in items:
             it.setdefault("via", "")
         text = format_results(items, max_n=cfg.booth_limit, title=total)
@@ -419,18 +434,19 @@ async def _handle_text(hint: str, adult: str | None = None) -> dict:
     except Exception as e:
         reason = vision.friendly_ai_error(e)
         logger.warning(f"AI 关键词翻译失败: {e}")
-        msg = f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）"
+        msg = f"Booth 上没搜到「{hint}」{page_note}（共 {res.get('total') or 0} 件）"
         return {"text": f"{msg}\n⚠ AI 翻译不可用：{reason}", "entries": []}
     if not kws:
-        return {"text": f"Booth 上没搜到「{hint}」（共 {res.get('total') or 0} 件）",
+        return {"text": f"Booth 上没搜到「{hint}」{page_note}（共 {res.get('total') or 0} 件）",
                 "entries": []}
-    merged, res = _search_merged(kws, adult)
+    merged, res = _search_merged(kws, adult, page)
     if not merged:
-        text = f"Booth 上没搜到「{hint}」，AI 关键词（{' / '.join(kws[:3])}）也未命中"
+        text = (f"Booth 上没搜到「{hint}」{page_note}，"
+                f"AI 关键词（{' / '.join(kws[:3])}）也未命中")
         return {"text": text, "entries": []}
     shown = min(len(merged), cfg.booth_limit)
-    header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:"
-              if res.get("total") else f"前 {shown}:")
+    header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}"
+              if res.get("total") else f"前 {shown}:{page_note}")
     header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
     for it in merged:
         it.setdefault("via", "")
@@ -459,6 +475,7 @@ async def _send_result(bot, event, result: dict):
 async def handle_vrc_search(bot, event: MessageEvent):
     m = SEARCH_RE.match(_plain(event))
     hint = (m.group(1) or "").strip() if m else ""
+    hint, page = _split_page(hint)
     urls = _collect_image_urls(event)
 
     if not urls and not hint:
@@ -472,7 +489,7 @@ async def handle_vrc_search(bot, event: MessageEvent):
                 await matcher.send("收到图片+提示，正在反查 Booth（10-60 秒）…")
             result = await _handle_image(urls[0], hint)
         else:
-            result = await _handle_text(hint)
+            result = await _handle_text(hint, page=page)
     except booth_client.BoothCliError as e:
         result = {"text": f"搜索失败: {e}", "entries": []}
     except Exception as e:
@@ -487,10 +504,11 @@ async def handle_vrc_r18(bot, event: MessageEvent):
         await r18_matcher.finish(DENY_MSG)
     m = R18_RE.match(_plain(event))
     hint = (m.group(1) or "").strip() if m else ""
+    hint, page = _split_page(hint)
     if not hint:
         await r18_matcher.finish("用法: /vrc r18 <关键词>（R-18 专项搜索，仅管理员）")
     try:
-        result = await _handle_text(hint, adult="only")
+        result = await _handle_text(hint, adult="only", page=page)
     except booth_client.BoothCliError as e:
         result = {"text": f"搜索失败: {e}", "entries": []}
     except Exception as e:

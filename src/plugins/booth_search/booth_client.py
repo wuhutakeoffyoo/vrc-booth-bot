@@ -83,10 +83,12 @@ def call_booth(action: str, params: dict | None = None,
 
 
 def search(query: str | list, *, limit: int = 5, sort: str = "popularity",
-           adult: str = "include", cli_path: str = "", timeout: int = 60) -> dict:
-    return call_booth("search", {
-        "query": query, "limit": limit, "sort": sort, "adult": adult,
-    }, cli_path=cli_path, timeout=timeout)
+           adult: str = "include", page: int = 1, cli_path: str = "",
+           timeout: int = 60) -> dict:
+    params = {"query": query, "limit": limit, "sort": sort, "adult": adult}
+    if page > 1:
+        params["page"] = page
+    return call_booth("search", params, cli_path=cli_path, timeout=timeout)
 
 
 def item(item_id, *, no_cache: bool = False, cli_path: str = "",
