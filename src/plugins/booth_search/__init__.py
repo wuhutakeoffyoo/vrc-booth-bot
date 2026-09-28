@@ -394,8 +394,21 @@ def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[
     cfg = plugin_config
     sort, sort_note = _effective_sort(page)
     limit = max(cfg.booth_limit, 10)
+    # 分词搜索：Booth AND 分词对多词短语脆弱，单词级检索词命中率最高；
+    # 连写形（ショコラドレス）整词保留。共 6 个检索词。
+    terms, seen_t = [], set()
+    for kw in kws[:6]:
+        for tok in re.split(r"[\s/、，,]+", str(kw)):
+            tok = tok.strip()
+            if len(tok) >= 2 and tok not in seen_t:
+                seen_t.add(tok)
+                terms.append(tok)
+        whole = str(kw).strip()
+        if " " in whole and whole not in seen_t:
+            seen_t.add(whole)
+            terms.append(whole)
     merged, seen, first_res = [], set(), {}
-    for kw in kws[:5]:
+    for kw in terms[:6]:
         try:
             res = booth_client.search(kw, limit=limit, sort=sort,
                                       adult=adult or cfg.r18_mode, page=page,
@@ -411,7 +424,7 @@ def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[
                 it["via"] = "关键词"
                 seen.add(it["id"])
                 merged.append(it)
-    low_kws = [k.lower() for k in kws[:5] if k]
+    low_kws = [k.lower() for k in terms if k]
     if low_kws:
         merged.sort(key=lambda it: not any(
             k in (it.get("name") or "").lower() for k in low_kws))
