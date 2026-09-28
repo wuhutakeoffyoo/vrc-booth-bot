@@ -422,36 +422,44 @@ def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[
 
 
 async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> dict:
-    """文本搜索入口：中文需求先经 AI 翻译成日语关键词；直搜空结果也用 AI 重试。
-    AI 失败时给用户准确原因，并注明已退化为原词直搜。page 为结果页码。
+    """文本搜索入口：中文需求并行执行 AI 翻译与知名商品回忆，合并搜索；
+    直搜空结果也会 AI 重试；失败时给用户准确原因并注明退化方式。
     返回 {"text", "entries", "header", "notes"}。"""
     cfg = plugin_config
     page_note = f"（第 {page} 页）" if page > 1 else ""
     ai_mode, _ = _ai_backend()
     ai_ready = bool(ai_mode)
-    ai_note = ""  # AI 不可用时的用户反馈行
+    ai_note = ""
+    zh_attempted = False
 
     if (ai_ready and vision._looks_chinese(hint)
             and not re.search(r"[A-Za-z]{4,}", hint)):
         # 含 4 字以上拉丁词（商品原名/罗马字）时不走翻译——百样本实测原词直搜
         # 命中率远高于 AI 翻译（Top1 5/7 vs 0），翻译仅作空结果兜底
-        try:
-            kws = await _ai_translate(hint)
-            kws = vision.expand_reading_variants(kws)  # 汉字词追加假名读音变体
-        except Exception as e:
-            reason = vision.friendly_ai_error(e)
-            logger.warning(f"中文关键词 AI 翻译失败（用原词直搜）: {e}")
-            kws = []
-            ai_note = f"⚠ AI 翻译不可用：{reason}（已用原词直搜）"
+        zh_attempted = True
+
+        async def _translate_task():
+            try:
+                return await _ai_translate(hint), ""
+            except Exception as e:
+                reason = vision.friendly_ai_error(e)
+                logger.warning(f"中文关键词 AI 翻译失败（用原词直搜）: {e}")
+                return [], f"⚠ AI 翻译不可用：{reason}（已用原词直搜）"
+
+        async def _recall_task():
+            if not cfg.recall_enabled:
+                return []
+            try:
+                return await _ai_recall(hint)
+            except Exception as e:
+                logger.warning(f"知名商品回忆失败: {e}")
+                return []
+
+        # 翻译与回忆相互独立，并行发起（省一轮 AI 等待）
+        (kws0, ai_note), rk_raw = await asyncio.gather(_translate_task(), _recall_task())
+        rk = [k for k in rk_raw if k.lower() not in {x.lower() for x in kws0}][:2]
+        kws = vision.expand_reading_variants(rk + kws0)
         if kws:
-            if cfg.recall_enabled:
-                try:
-                    rk = [k for k in await _ai_recall(hint)
-                          if k.lower() not in {x.lower() for x in kws}][:2]
-                    if rk:
-                        kws = rk + kws  # 回忆的具体商品名优先搜索
-                except Exception as e:
-                    logger.warning(f"知名商品回忆失败: {e}")
             merged, res = _search_merged(kws, adult, page)
             if merged:
                 shown = min(len(merged), cfg.booth_limit)
@@ -463,18 +471,17 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
                         "entries": merged, "header": header,
                         "notes": [ai_note] if ai_note else []}
 
-    # 原词直搜；空结果且 AI 可用时翻译重试
-    # （中文词在 Booth 常返回空搜索页，CLI 会抛 BoothCliError，按空结果处理）
+    # 原词直搜；中文路径无果时不再重复翻译，非中文空结果走 AI 关键词重试
     sort, sort_note = _effective_sort(page)
     try:
         res = booth_client.search(hint, limit=cfg.booth_limit, sort=sort,
                                   adult=adult or cfg.r18_mode, page=page,
-                                  tag=(cfg.vrc_tag or None), cli_path=cfg.booth_cli_path,
+                                  cli_path=cfg.booth_cli_path,
                                   timeout=cfg.search_timeout)
     except booth_client.BoothCliError as e:
         logger.warning(f"原词直搜无结果({hint}): {e}")
         res = {"items": [], "total": 0}
-    if (res.get("items") or []) or not ai_ready:
+    if (res.get("items") or []) or not ai_ready or zh_attempted:
         items = res.get("items") or []
         if not items:
             web_entries = await _webfind_entries(hint, [hint])
@@ -504,13 +511,6 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
     if not kws:
         return {"text": f"Booth 上没搜到「{hint}」{page_note}（共 {res.get('total') or 0} 件）",
                 "entries": []}
-    if cfg.recall_enabled:
-        try:
-            rk = [k for k in await _ai_recall(hint)
-                  if k.lower() not in {x.lower() for x in kws}][:2]
-            kws = rk + kws
-        except Exception as e:
-            logger.warning(f"知名商品回忆失败: {e}")
     merged, res = _search_merged(kws, adult, page)
     if not merged:
         web_entries = await _webfind_entries(hint, kws)
@@ -572,6 +572,7 @@ async def handle_vrc_search(bot, event: MessageEvent):
                 await matcher.send("收到图片+提示，正在反查 Booth（10-60 秒）…")
             result = await _handle_image(urls[0], hint)
         else:
+            await matcher.send("Booth 搜索中，请稍候（中文查询含 AI 翻译，约 30-90 秒）…")
             result = await _handle_text(hint, page=page)
     except booth_client.BoothCliError as e:
         result = {"text": f"搜索失败: {e}", "entries": []}
