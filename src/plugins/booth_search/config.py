@@ -34,6 +34,11 @@ class Config(BaseModel):
     fallback_api_key: str = ""
     fallback_base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4"
     fallback_model: str = "glm-5.3-flash"
+    # 自我纠错：利用模型 VRChat 圈知识回忆知名商品名（中文查询时追加搜索）
+    recall_enabled: bool = True
+    # 网络检索兜底：站内搜索无果时从 DDG/Exa 找 booth.pm 商品链接（Exa 需 key）
+    websearch_fallback: bool = True
+    exa_api_key: str = ""
 
     # 访问控制
     # 群白名单（空 = 不限制群；.env 示例: GROUP_WHITELIST='["111","222"]'，

@@ -163,6 +163,26 @@ async def _ai_translate(text: str) -> list:
         timeout=cfg.ai_cli_timeout)
 
 
+async def _ai_recall(desc: str) -> list:
+    """知名商品回忆：利用模型 VRChat 圈知识产出具体商品名（api 双路，不回落 cli）。"""
+    cfg = plugin_config
+    try:
+        return await vision.recall_products(
+            desc, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
+            model=cfg.vision_model, session_id=cfg.vision_session_id,
+            timeout=cfg.vision_timeout)
+    except Exception as e:
+        logger.warning(f"主 api 回忆失败，尝试 GLM Coding Plan: {vision.friendly_ai_error(e)}")
+    if cfg.fallback_api_key:
+        try:
+            return await vision.recall_products(
+                desc, base_url=cfg.fallback_base_url, api_key=cfg.fallback_api_key,
+                model=cfg.fallback_model, timeout=cfg.vision_timeout)
+        except Exception as e:
+            logger.warning(f"GLM Coding Plan 回忆失败: {vision.friendly_ai_error(e)}")
+    return []
+
+
 async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
     cfg = plugin_config
     mode, param = _ai_backend()
@@ -382,7 +402,7 @@ def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> tuple[
                 it["via"] = "关键词"
                 seen.add(it["id"])
                 merged.append(it)
-    low_kws = [k.lower() for k in kws[:3] if k]
+    low_kws = [k.lower() for k in kws[:5] if k]
     if low_kws:
         merged.sort(key=lambda it: not any(
             k in (it.get("name") or "").lower() for k in low_kws))
@@ -415,6 +435,14 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
             kws = []
             ai_note = f"⚠ AI 翻译不可用：{reason}（已用原词直搜）"
         if kws:
+            if cfg.recall_enabled:
+                try:
+                    rk = [k for k in await _ai_recall(hint)
+                          if k.lower() not in {x.lower() for x in kws}][:2]
+                    if rk:
+                        kws = rk + kws  # 回忆的具体商品名优先搜索
+                except Exception as e:
+                    logger.warning(f"知名商品回忆失败: {e}")
             merged, res = _search_merged(kws, adult, page)
             if merged:
                 shown = min(len(merged), cfg.booth_limit)
@@ -440,6 +468,11 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
     if (res.get("items") or []) or not ai_ready:
         items = res.get("items") or []
         if not items:
+            web_entries = await _webfind_entries(hint, [hint])
+            if web_entries:
+                text = format_results(web_entries, max_n=3,
+                                      title=f"网络检索命中（站内无「{hint}」）:")
+                return {"text": text, "entries": web_entries}
             msg = f"Booth 上没搜到「{hint}」{page_note}（共 {res.get('total') or 0} 件）"
             return {"text": f"{msg}\n{ai_note}" if ai_note else msg, "entries": []}
         total = (f"共 {res['total']:,} 件，显示前 {len(items)}:{page_note}{sort_note}"
@@ -462,8 +495,20 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
     if not kws:
         return {"text": f"Booth 上没搜到「{hint}」{page_note}（共 {res.get('total') or 0} 件）",
                 "entries": []}
+    if cfg.recall_enabled:
+        try:
+            rk = [k for k in await _ai_recall(hint)
+                  if k.lower() not in {x.lower() for x in kws}][:2]
+            kws = rk + kws
+        except Exception as e:
+            logger.warning(f"知名商品回忆失败: {e}")
     merged, res = _search_merged(kws, adult, page)
     if not merged:
+        web_entries = await _webfind_entries(hint, kws)
+        if web_entries:
+            return {"text": format_results(web_entries, max_n=3,
+                    title="网络检索命中（站内搜索无果，供参考）:"),
+                    "entries": web_entries}
         text = (f"Booth 上没搜到「{hint}」{page_note}，"
                 f"AI 关键词（{' / '.join(kws[:3])}）也未命中")
         return {"text": text, "entries": []}

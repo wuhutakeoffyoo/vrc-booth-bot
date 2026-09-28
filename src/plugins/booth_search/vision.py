@@ -140,6 +140,49 @@ def _is_reasoning_prose(text: str) -> bool:
             or "i can see" in lowered or "text visible" in lowered)
 
 
+_RECALL_PROMPT = (
+    "你是 VRChat 圈的资深玩家，熟悉 Booth.pm 上的知名模型、衣装、髪型、ギミック与热门商品。"
+    "中国用户想找这样的 VRChat 素材：『{desc}』。"
+    "根据你对 VRChat 圈的了解，写出最可能的具体商品名（日文原名，含作者名更好），最多 3 个；"
+    "不确定就给最接近的通称。只输出 JSON："
+    '{"candidates": ["商品名1", "商品名2"]}'
+)
+
+
+def parse_recall(content: str) -> list:
+    """解析知名商品回忆的模型输出（JSON 优先，兜底按行拆）。"""
+    m = re.search(r"\{.*\}", content or "", re.S)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            cands = data.get("candidates") or []
+            if isinstance(cands, list):
+                return [str(c).strip() for c in cands
+                        if str(c).strip() and not _is_reasoning_prose(str(c))]
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    parts = re.split(r"[\n,，、]+", content or "")
+    return [p.strip(" -·*") for p in parts
+            if len(p.strip(" -·*")) >= 2 and not _is_reasoning_prose(p)][:3]
+
+
+async def recall_products(desc: str, *, base_url: str, api_key: str,
+                          model: str, session_id: str = "",
+                          timeout: int = 60) -> list:
+    """利用模型的 VRChat 圈知识回忆可能的知名商品名（自我纠错层）。"""
+    guard_api_base(base_url)
+    url = base_url.rstrip("/") + "/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user",
+                      "content": _RECALL_PROMPT.replace("{desc}", desc)}],
+        "temperature": 0.3,
+        "max_tokens": 2000,
+    }
+    content = await _api_post(url, payload, api_key, session_id, timeout)
+    return parse_recall(content)
+
+
 def friendly_ai_error(e: Exception) -> str:
     """把 AI 调用异常翻译成准确、可行动的中文反馈（给群友看的）。"""
     if isinstance(e, httpx.HTTPStatusError):
