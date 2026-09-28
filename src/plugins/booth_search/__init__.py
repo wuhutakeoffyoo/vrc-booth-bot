@@ -513,7 +513,8 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
         text = format_results(items, max_n=cfg.booth_limit, title=total)
         return {"text": f"{text}\n{ai_note}" if ai_note else text,
                 "entries": items, "header": total,
-                "notes": [ai_note] if ai_note else []}
+                "notes": [ai_note] if ai_note else [],
+                "page": page, "qhint": hint, "total": res.get("total")}
 
     try:
         kws = await _ai_translate(hint)
