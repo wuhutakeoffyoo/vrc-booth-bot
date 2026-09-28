@@ -212,15 +212,22 @@ async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
 
 async def _handle_image(image_url: str, hint: str) -> dict:
     cfg = plugin_config
-    try:
-        image_bytes = await _download_image(image_url)
-    except httpx.HTTPStatusError as e:
-        code = e.response.status_code
-        tip = ("图床临时不可用（5xx），请稍后重发"
-               if code >= 500 else f"图片下载失败（HTTP {code}），确认图片链接有效")
-        return {"text": f"⚠ {tip}", "entries": []}
-    except httpx.TransportError:
-        return {"text": "⚠ 图片下载失败：网络异常，请稍后重发", "entries": []}
+    if image_url.startswith("file://"):
+        # 本地文件直读（盲测/调试通道）
+        try:
+            image_bytes = Path(image_url[7:]).read_bytes()
+        except OSError as e:
+            return {"text": f"⚠ 本地图片读取失败: {e}", "entries": []}
+    else:
+        try:
+            image_bytes = await _download_image(image_url)
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            tip = ("图床临时不可用（5xx），请稍后重发"
+                   if code >= 500 else f"图片下载失败（HTTP {code}），确认图片链接有效")
+            return {"text": f"⚠ {tip}", "entries": []}
+        except httpx.TransportError:
+            return {"text": "⚠ 图片下载失败：网络异常，请稍后重发", "entries": []}
 
     # 1) 识图 AI 提词（AI 不可用则跳过，仅靠 CLI 自带派生词）
     keywords, item_type = [], ""
