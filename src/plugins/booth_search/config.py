@@ -38,3 +38,5 @@ class Config(BaseModel):
     admin_users: list[int | str] = []
     # 非管理员私聊是否可用（True=可用；False=私聊仅管理员）
     allow_private: bool = True
+    # 搜索结果以 QQ 合并转发（转发消息，含商品图）发送；关闭则纯文本
+    forward_messages: bool = True
