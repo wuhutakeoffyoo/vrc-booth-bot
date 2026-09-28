@@ -21,6 +21,8 @@ def make_cfg(**kw):
         group_whitelist=["100000001", "200000002"],
         admin_users=["300000003", 400000004],  # 故意混用 int/str 验证规范化
         allow_private=True,
+        user_cooldown=10,
+        user_rate_limit=5,
     )
     base.update(kw)
     return Config(**base)
@@ -56,6 +58,48 @@ class TestAccessControl(unittest.TestCase):
     def test_empty_whitelist_allows_all_groups(self):
         cfg = make_cfg(group_whitelist=[])
         self.assertTrue(access.access_ok(cfg, user_id=100, group_id=12345))
+
+
+class TestRateLimit(unittest.TestCase):
+    def setUp(self):
+        access._user_hits.clear()
+
+    def test_cooldown_between_searches(self):
+        cfg = make_cfg(user_cooldown=10, user_rate_limit=5)
+        clock = [1000.0]
+
+        def now():
+            return clock[0]
+
+        ok1, _ = access.check_rate(cfg, 100, now=now())
+        self.assertTrue(ok1)
+        clock[0] += 3  # 间隔 3s < cooldown 10s
+        ok2, wait = access.check_rate(cfg, 100, now=now())
+        self.assertFalse(ok2)
+        self.assertTrue(6 <= wait <= 11)
+        clock[0] += 11  # 超过 cooldown
+        ok3, _ = access.check_rate(cfg, 100, now=now())
+        self.assertTrue(ok3)
+
+    def test_per_minute_cap(self):
+        cfg = make_cfg(user_cooldown=0, user_rate_limit=3)
+        clock = [2000.0]
+        for i in range(3):
+            ok, _ = access.check_rate(cfg, 100, now=clock[0])
+            self.assertTrue(ok)
+            clock[0] += 0.5
+        ok, wait = access.check_rate(cfg, 100, now=clock[0])
+        self.assertFalse(ok)
+        self.assertGreater(wait, 0)
+        # 窗口滑过后恢复
+        clock[0] += 61
+        ok, _ = access.check_rate(cfg, 100, now=clock[0])
+        self.assertTrue(ok)
+
+    def test_users_isolated(self):
+        cfg = make_cfg(user_cooldown=10, user_rate_limit=5)
+        self.assertTrue(access.check_rate(cfg, 100, now=3000.0)[0])
+        self.assertTrue(access.check_rate(cfg, 200, now=3000.0)[0])  # 不同用户互不影响
 
 
 class TestSplitPage(unittest.TestCase):

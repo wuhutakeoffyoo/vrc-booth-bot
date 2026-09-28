@@ -48,3 +48,6 @@ class Config(BaseModel):
     # VRC 对口：所有关键词搜索自动附加 --tag VRChat，把结果收窄到 VRChat 商品圈
     # （置空 vrc_tag 即关闭收窄）
     vrc_tag: str = "VRChat"
+    # bot 侧限速：同一用户两次搜索的最小间隔（秒）与每分钟上限，防止刷指令触发风控
+    user_cooldown: int = 10
+    user_rate_limit: int = 5

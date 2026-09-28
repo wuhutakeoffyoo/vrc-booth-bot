@@ -497,6 +497,11 @@ async def _send_result(bot, event, result: dict):
 
 @matcher.handle()
 async def handle_vrc_search(bot, event: MessageEvent):
+    ok, wait = access.check_rate(plugin_config, getattr(event, "user_id", ""))
+    if not ok:
+        await matcher.finish(f"查询太频繁：请 {wait} 秒后再试"
+                             f"（限流：每人 {plugin_config.user_cooldown} 秒间隔、"
+                             f"每分钟 {plugin_config.user_rate_limit} 次）")
     m = SEARCH_RE.match(_plain(event))
     hint = (m.group(1) or "").strip() if m else ""
     hint, page = _split_page(hint)
@@ -524,6 +529,11 @@ async def handle_vrc_search(bot, event: MessageEvent):
 
 @r18_matcher.handle()
 async def handle_vrc_r18(bot, event: MessageEvent):
+    ok, wait = access.check_rate(plugin_config, getattr(event, "user_id", ""))
+    if not ok:
+        await r18_matcher.finish(f"查询太频繁：请 {wait} 秒后再试"
+                                 f"（限流：每人 {plugin_config.user_cooldown} 秒间隔、"
+                                 f"每分钟 {plugin_config.user_rate_limit} 次）")
     if not access.sensitive_allowed(plugin_config, getattr(event, "user_id", "")):
         await r18_matcher.finish(DENY_MSG)
     m = R18_RE.match(_plain(event))
