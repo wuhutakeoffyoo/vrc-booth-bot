@@ -535,6 +535,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
                 header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
                           if res.get("total") else f"前 {shown}:{page_note}{sn}")
                 header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
+                await _enrich_entries(merged[:cfg.booth_limit])
                 return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
                         "entries": merged, "header": header,
                         "notes": [ai_note] if ai_note else [],
@@ -564,6 +565,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
                  if res.get("total") else f"前 {len(items)}:{page_note}{sort_note}")
         for it in items:
             it.setdefault("via", "")
+        await _enrich_entries(items[:cfg.booth_limit])
         text = format_results(items, max_n=cfg.booth_limit, title=total)
         return {"text": f"{text}\n{ai_note}" if ai_note else text,
                 "entries": items, "header": total,
@@ -596,6 +598,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
     header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
               if res.get("total") else f"前 {shown}:{page_note}{sn}")
     header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
+    await _enrich_entries(merged[:cfg.booth_limit])
     for it in merged:
         it.setdefault("via", "")
     return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
