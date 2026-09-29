@@ -64,6 +64,13 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
   （最多 4 次，指数退避+抖动）→ gzip 解压。
 - **bot JSON 信封**（`booth bot`）：子进程进出、stdout 单行 JSON、退出码恒 0、永不抛栈。
   信封里的 snake_case 参数转成 argv 走同一条 argparse 路径——bot 与 CLI 人类用法永远行为一致。
+- **智能搜索 `booth smart`（VRC 对口，与 bot 同源策略）**：需求式描述直接走完整
+  bot 侧管线——AI 关键词（单词级 + desc_keywords）→ 单词级分词 3 线程并发合并
+  （出站仍受全局限速约束）→ 空结果回忆/网络检索兜底 → 拉详情（简介扩 2000 字）
+  按商品说明文匹配置顶。AI 环境变量与 bot 同名（一份 .env 两边通用），缺省降级为
+  分词+读音变体直搜。实现于 `smart_search.py`（零依赖：AI/检索走 urllib；
+  pykakasi 可选依赖，未装跳过读音维度）。search/smart 默认收窄 VRChat 圈
+  （`--no-vrc` 关闭）；popularity 排序翻页自动切新着并标注 sort_note。
 - **版本守卫**：bot 侧首次调用前校验 `booth --version ≥ 1.2.0`（旧版没有 bot 钩子，
   是最常见的部署坑），结果进程内缓存只查一次。
 - **错误即信息**：Cloudflare 盾（"Just a moment"）检测后报「该店无法直接抓取」，
@@ -79,6 +86,9 @@ Booth 标题多是日文原名，原词直搜往往就是最优解。含 4 字�
 翻译只留作直搜空结果的兜底。
 
 ### 3.2 中文链路（AI 翻译 + 分词搜索）
+
+> 本节策略已下沉为 CLI 的 `booth smart`（`smart_search.py` 为 bot 侧 vision/webfind/rank
+> 的零依赖移植，环境变量同名共用）——两仓一套策略，两个入口。
 
 1. **中文判定** `_looks_chinese`：简体字特有形优先（混片假名的中文查询也算中文）→
    有假名判日语 → 有汉字默认中文。
