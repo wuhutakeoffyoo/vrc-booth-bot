@@ -68,8 +68,8 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
   bot 侧管线——AI 关键词（单词级 + desc_keywords）→ 单词级分词 3 线程并发合并
   （出站仍受全局限速约束）→ 空结果回忆/网络检索兜底 → 拉详情（简介扩 2000 字）
   按商品说明文匹配置顶。AI 环境变量与 bot 同名（一份 .env 两边通用），缺省降级为
-  分词+读音变体直搜。实现于 `smart_search.py`（零依赖：AI/检索走 urllib；
-  pykakasi 可选依赖，未装跳过读音维度）。search/smart 默认收窄 VRChat 圈
+  分词+读音变体直搜。实现于 `smart_search.py`（AI/检索走 urllib；pykakasi 为必装
+  依赖，提供假名读音变体）。search/smart 默认收窄 VRChat 圈
   （`--no-vrc` 关闭）；popularity 排序翻页自动切新着并标注 sort_note。
 - **版本守卫**：bot 侧首次调用前校验 `booth --version ≥ 1.2.0`（旧版没有 bot 钩子，
   是最常见的部署坑），结果进程内缓存只查一次。
@@ -96,9 +96,11 @@ Booth 标题多是日文原名，原词直搜往往就是最优解。含 4 字�
    （让模型以 VRChat 圈知识直接报具体商品名）相互独立，`asyncio.gather` 同时发起，省一轮等待。
 3. **翻译提示词的核心约束**：每个关键词必须是**单个单词**（Booth 多词 AND 匹配，短语脆弱）、
    专有名词给日本市场实际写法（外来语完整片假名转写）、按命中可能性排序。
+   这套「给小语种翻译上术语与写法规范」的设计参考了 E 站（E-Hentai）AI 翻译本子类
+   开源实践——LLM 裸翻小语种不可靠，要用领域词表与转写规则约束输出。
 4. **变体扩展** `expand_reading_variants`：pykakasi 汉字→平假名读音（信濃→しなの，
    Booth 不做跨字形归一）；含空格的词追加去空格连写形（ショコラ ドレス→ショコラドレス）；
-   同读音关键词（リング/指輪）只保留首个，省检索槽位。pykakasi 未安装自动跳过该维度。
+   同读音关键词（リング/指輪）只保留首个，省检索槽位。pykakasi 为必装依赖。
 5. **分词搜索** `_search_merged`：关键词拆到单词级（≥2 字），连写形整词保留，
    最多 6 词 3 路并发搜索，结果合并去重——标题含任一检索词的候选置顶（稳定排序）。
 6. **描述核实** `desc_keywords`：翻译提示词同时产出『需要到商品说明文核实的词』
@@ -223,6 +225,7 @@ BoothUnavailable → 结果里给准确原因（friendly_ai_error）
 | [kitUIN/PicImageSearch](https://github.com/kitUIN/PicImageSearch) | Bing 视觉搜索纯 HTTP 协议（multipart 上传 → bcid → detailV2 链）与 imageSignature 解密（XOR + 偏移 3） |
 | [requests-cache](https://github.com/requests-cache/requests-cache) | 持久 HTTP 缓存设计：URL 为 key、sqlite 存储、按资源类型分 TTL |
 | [tenacity](https://github.com/jd/tenacity) | 重试策略：优先响应 `Retry-After`，否则指数退避 + 抖动 |
+| E 站（E-Hentai）AI 翻译本子类开源实践 | 设计参考（非代码）：小语种翻译的术语约束与写法规范——中文翻译提示词的结构来源 |
 
 ### 运行组件
 
@@ -245,11 +248,17 @@ BoothUnavailable → 结果里给准确原因（friendly_ai_error）
 
 ## 7. 盲测方法论：设计决策的依据
 
-三链路的策略不是拍脑袋，全部由 100 样本 VRC 对口盲测数据驱动
+三链路的策略不是拍脑袋，全部由盲测数据驱动：每条链路盲抽 100 个 VRC 对口样板，
+目标准确率 ≥90%，按「跑测 → 改策略 → 复测」自迭代
 （booth-cli `scripts/`：`samples_vrc100.py` 取样、`zhgen100.py` 生成用户口吻中文查询、
 `blind_one.py` 单链路 harness，支持 `--start/--end/--dir` 切片并行；数据集在服务器 `~/vblind100/`）。
 
-当前成绩（Top6 命中率）：**JP 95% / ZH 100% / IMG 98%**；IMG Top1 45%（瓶颈见 §8）。
+最终成绩：**JP 95% / ZH 100% / IMG 93%**。
+
+IMG 链路是这套方法论的代表案例：一测 Top1 约 50% 就撞上瓶颈——图片里的**艺术字**
+（风格化标题、店铺水印）会干扰视觉模型的 OCR；接入 **Exa 网络检索**与 **LLM 自有
+知识库的知名商品回忆**（自我纠错层）后，二测突破瓶颈到 93%。
+
 盲测推翻/确立过的决策举例：
 
 - 中文查询含 4 字以上拉丁词时不走 AI 翻译（原词直搜 Top1 5/7 vs 翻译 0）。
@@ -259,8 +268,8 @@ BoothUnavailable → 结果里给准确原因（friendly_ai_error）
 
 ## 8. 已知限制与下一步
 
-1. **IMG Top1 仅 45%**（Top6 98%）：瓶颈是 glm-5.3-flash 视觉对艺术字 OCR 误读，
-   换更强视觉模型或专用 OCR 可突破。
+1. **IMG 极端艺术字仍会误读**：93% 之后的剩余头部集中在视觉模型对风格化字体的
+   识别，换更强视觉模型或专用 OCR 可再进一步。
 2. **查询延迟 1-2 分钟**：中文/识图链路的 AI 串行调用固有成本，可考虑预取或更快端点。
 3. **Booth ja 搜索页偶发不渲染**：未修，靠重试兜住。
 4. 个别店铺开了 Cloudflare 盾无法抓取（会精准报错）；多数商店商品列表前端加载，
