@@ -7,6 +7,9 @@
 - `/vrc search <关键词>` → 调 booth-cli 关键词搜索（自动收窄 VRChat 圈），返回 Top 结果（名称/价格/链接/店铺/R-18 标记）；末尾数字为页码（如 `/vrc search 猫娘女仆装 2`）
 - `/vrc search` + 图片（或回复一张图片）→ 识图 AI 提取关键词 + booth-cli 反向图搜，
   双路合并返回候选（合并转发消息，每条附商品图）
+- 「适用于XX素体的服装」类需求：AI 同时产出标题关键词与说明文核实词，
+  按商品说明（対応素体/仕様 段落）匹配后置顶，结果注明核实情况
+- 部位/用途类需求（尾巴/耳朵/ギミック 等）由 AI 转成日本圈行业词多路检索
 - R-18 过滤策略可配（`R18_MODE=include/exclude/only`）， adult 结果带标记展示
 
 ## 架构
@@ -17,7 +20,10 @@ QQ → 京东云 NapCat --反向WS--> 腾讯云SG: NoneBot(booth-bot) --subproce
 识图 AI（OpenAI 兼容接口，GLM-5.3-Flash 样例）←— VISION_API_KEY 配置接入
 ```
 
-部署与代理方案（京东云 NapCat + 新加坡 booth 出口）见 [PROXY_DEPLOYMENT.md](PROXY_DEPLOYMENT.md)（设计稿，待实测）。
+系统设计详解（运作原理、三链路设计、分层兜底思路、参考的开源项目、盲测方法论）
+见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+部署与代理方案（京东云 NapCat + 新加坡 booth 出口）见 [PROXY_DEPLOYMENT.md](PROXY_DEPLOYMENT.md)。
 
 ## 本地运行
 
