@@ -19,7 +19,7 @@ from nonebot import get_plugin_config, logger, on_message
 from nonebot.adapters.onebot.v11 import MessageEvent
 from nonebot.rule import Rule
 
-from . import access, booth_client, forward, vision
+from . import access, booth_client, forward, qcache, rank, vision, webfind
 from .config import Config
 from .format import format_results
 
@@ -131,8 +131,9 @@ def _ai_backend() -> tuple[str, str]:
     return "", ""
 
 
-async def _ai_translate(text: str) -> list:
-    """主 api（Go 套餐）→ 兜底 api（GLM Coding Plan）→ cli（mimo free）逐级回落。"""
+async def _ai_translate(text: str) -> tuple[list, list]:
+    """中文需求 → 搜索方案 (标题关键词, 描述核实关键词)。
+    主 api（Go 套餐）→ 兜底 api（GLM Coding Plan）→ cli（mimo free）逐级回落。"""
     cfg = plugin_config
     mode, param = _ai_backend()
     if mode == "api":
@@ -230,8 +231,8 @@ async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
         model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
 
 
-async def _enrich_entries(entries: list) -> None:
-    """为候选补全商品详情（收藏数/真实 tags，来自 item 详情接口）。
+async def _enrich_entries(entries: list, desc_len: int = 600) -> None:
+    """为候选补全商品详情（收藏数/真实 tags/上架日期/简介 _desc 供描述核实）。
     并发受限 3 路，单条失败静默跳过。"""
     cfg = plugin_config
     sem = asyncio.Semaphore(3)
@@ -240,7 +241,7 @@ async def _enrich_entries(entries: list) -> None:
         async with sem:
             try:
                 detail = await asyncio.to_thread(
-                    booth_client.item, it.get("id"),
+                    booth_client.item, it.get("id"), desc_len=desc_len,
                     cli_path=cfg.booth_cli_path, timeout=cfg.search_timeout)
             except Exception:
                 return
@@ -248,6 +249,7 @@ async def _enrich_entries(entries: list) -> None:
                 v = detail.get(k)
                 if v:
                     it[k] = v
+            it["_desc"] = detail.get("description") or ""
 
     await asyncio.gather(*[one(it) for it in entries])
 
@@ -489,8 +491,39 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
     return merged, first_res
 
 
+async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
+                            desc_kws: list, page: int, page_note: str,
+                            ai_note: str = "") -> dict:
+    """AI 关键词搜索的统一出口：可选描述核实重排 → 补详情 → 组装返回。
+
+    desc_kws 非空时（『适用于XX素体』类需求）拉大详情池、简介扩长，
+    按商品说明文匹配置顶——兼容信息（対応素体/仕様）写在说明里而非标题，
+    只搜标题永远碰不到；核实结果在 header 里注明，让用户知道降级与否。
+    """
+    cfg = plugin_config
+    shown = min(len(merged), cfg.booth_limit)
+    sn = res.get("sort_note") or ""
+    header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
+              if res.get("total") else f"前 {shown}:{page_note}{sn}")
+    header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
+    if desc_kws:
+        await _enrich_entries(merged[:15], desc_len=2000)
+        merged = rank.desc_boost(merged, kws, desc_kws)
+        n_hit = sum(1 for it in merged if rank.desc_hit(it, desc_kws))
+        header += (f"\n已按商品说明核实「{' / '.join(desc_kws[:2])}」:{n_hit} 件命中"
+                   if n_hit else
+                   "\n商品说明里未核实到对应信息，按标题相关度展示")
+    else:
+        await _enrich_entries(merged[:cfg.booth_limit])
+    return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
+            "entries": merged, "header": header,
+            "notes": [ai_note] if ai_note else [],
+            "page": page, "qhint": hint, "total": res.get("total")}
+
+
 async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> dict:
     """文本搜索入口：中文需求并行执行 AI 翻译与知名商品回忆，合并搜索；
+    翻译同时产出 desc_keywords（说明文核实词，『适用于XX素体』类需求用）；
     直搜空结果也会 AI 重试；失败时给用户准确原因并注明退化方式。
     返回 {"text", "entries", "header", "notes"}。"""
     cfg = plugin_config
@@ -508,11 +541,12 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
 
         async def _translate_task():
             try:
-                return await _ai_translate(hint), ""
+                kws, dkws = await _ai_translate(hint)
+                return kws, dkws, ""
             except Exception as e:
                 reason = vision.friendly_ai_error(e)
                 logger.warning(f"中文关键词 AI 翻译失败（用原词直搜）: {e}")
-                return [], f"⚠ AI 翻译不可用：{reason}（已用原词直搜）"
+                return [], [], f"⚠ AI 翻译不可用：{reason}（已用原词直搜）"
 
         async def _recall_task():
             if not cfg.recall_enabled:
@@ -524,22 +558,14 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
                 return []
 
         # 翻译与回忆相互独立，并行发起（省一轮 AI 等待）
-        (kws0, ai_note), rk_raw = await asyncio.gather(_translate_task(), _recall_task())
+        (kws0, desc_kws, ai_note), rk_raw = await asyncio.gather(_translate_task(), _recall_task())
         rk = [k for k in rk_raw if k.lower() not in {x.lower() for x in kws0}][:2]
         kws = vision.expand_reading_variants(rk + kws0)
         if kws:
             merged, res = await _search_merged(kws, adult, page)
             if merged:
-                shown = min(len(merged), cfg.booth_limit)
-                sn = res.get("sort_note") or ""
-                header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
-                          if res.get("total") else f"前 {shown}:{page_note}{sn}")
-                header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
-                await _enrich_entries(merged[:cfg.booth_limit])
-                return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
-                        "entries": merged, "header": header,
-                        "notes": [ai_note] if ai_note else [],
-                        "page": page, "qhint": hint, "total": res.get("total")}
+                return await _merged_zh_result(hint, merged, res, kws, desc_kws,
+                                               page, page_note, ai_note)
 
     # 原词直搜；中文路径无果时不再重复翻译，非中文空结果走 AI 关键词重试
     sort, sort_note = _effective_sort(page)
@@ -573,7 +599,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
                 "page": page, "qhint": hint, "total": res.get("total")}
 
     try:
-        kws = await _ai_translate(hint)
+        kws, desc_kws = await _ai_translate(hint)
         kws = vision.expand_reading_variants(kws)  # 汉字词追加假名读音变体
     except Exception as e:
         reason = vision.friendly_ai_error(e)
@@ -593,16 +619,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
         text = (f"Booth 上没搜到「{hint}」{page_note}，"
                 f"AI 关键词（{' / '.join(kws[:3])}）也未命中")
         return {"text": text, "entries": []}
-    shown = min(len(merged), cfg.booth_limit)
-    sn = res.get("sort_note") or ""
-    header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
-              if res.get("total") else f"前 {shown}:{page_note}{sn}")
-    header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
-    await _enrich_entries(merged[:cfg.booth_limit])
-    for it in merged:
-        it.setdefault("via", "")
-    return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
-            "entries": merged, "header": header}
+    return await _merged_zh_result(hint, merged, res, kws, desc_kws, page, page_note)
 
 
 async def _send_result(bot, event, result: dict, from_cache: bool = False):
@@ -611,7 +628,7 @@ async def _send_result(bot, event, result: dict, from_cache: bool = False):
     entries = result.get("entries") or []
     header = result.get("header") or ""
     if from_cache and header:
-        header = header + chr(92) + "n（缓存结果，可能非最新）"
+        header = header + "\n（缓存结果，可能非最新）"
     if cfg.forward_messages and entries:
         try:
             nodes = await forward.build_result_nodes(
@@ -624,7 +641,7 @@ async def _send_result(bot, event, result: dict, from_cache: bool = False):
             return
     text = result["text"]
     if from_cache and result.get("header"):
-        text = "(缓存结果，可能非最新)" + chr(92) + "n" + text
+        text = "(缓存结果，可能非最新)\n" + text
     await matcher.finish(text)
 
 
@@ -644,7 +661,7 @@ async def handle_vrc_search(bot, event: MessageEvent):
         await matcher.finish(USAGE)
 
     # 查询缓存：相同查询（模式/页码/词）在 TTL 内直接回缓存结果，省 AI 额度
-    cache_key = qcache.make_key("search", cfg.r18_mode, page,
+    cache_key = qcache.make_key("search", plugin_config.r18_mode, page,
                                 hint, urls[0] if urls else "")
     cached = (qcache.get(cache_key, plugin_config.query_cache_ttl)
               if plugin_config.query_cache_ttl > 0 and not urls else None)

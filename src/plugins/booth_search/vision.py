@@ -93,6 +93,30 @@ def parse_keywords(content: str) -> tuple[list, str]:
     return clean[:8], item_type
 
 
+def parse_translation(content: str) -> tuple[list, list]:
+    """解析翻译输出：(标题搜索关键词, 描述核实关键词)。
+    JSON 优先（keywords/desc_keywords），坏 JSON 退回按行拆（desc 为空）。"""
+    m = re.search(r"\{.*\}", content or "", re.S)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            kws = data.get("keywords") or []
+            if isinstance(kws, list):
+                clean = [str(k).strip() for k in kws
+                         if str(k).strip() and not _is_reasoning_prose(str(k))]
+                dkws = data.get("desc_keywords") or []
+                dclean = ([str(k).strip() for k in dkws
+                           if str(k).strip() and not _is_reasoning_prose(str(k))]
+                          if isinstance(dkws, list) else [])
+                return clean, dclean[:3]
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    parts = re.split(r"[\n,，、/|]+", content or "")
+    clean = [p.strip(" -·*") for p in parts
+             if len(p.strip(" -·*")) >= 2 and not _is_reasoning_prose(p)]
+    return clean[:8], []
+
+
 def expand_reading_variants(keywords: list) -> list:
     """为关键词追加搜索变体（开源工具链）：
     1. pykakasi 汉字→平假名读音（信濃→しなの；Booth 标题词形不统一且搜索
@@ -269,18 +293,23 @@ async def extract_keywords(image_bytes: bytes, *, hint: str = "",
     return parse_keywords(content)
 
 
-# 中文→Booth 日语关键词的文本翻译提示词
+# 中文/需求描述 → Booth 搜索方案的提示词：标题关键词 + 说明文核实词
 _TRANSLATE_PROMPT = (
-    "用户在 Booth.pm（日本同人/VRChat 素材市场）找商品，但输入的是中文。"
-    "把它转换成最多 8 个 Booth 站内搜索关键词。要求：\n"
-    "1. 每个关键词必须是【单个单词】，一个关键词只表达一个概念，"
+    "用户在 Booth.pm（日本同人/VRChat 素材市场）找商品，输入的是中文口语/需求描述。"
+    "先理解用户真实想要什么，再输出搜索方案，只输出 JSON："
+    '{"keywords": ["单词1", "单词2"], "desc_keywords": ["需要到商品说明里核实的词"]}\n'
+    "keywords（最多 8 个，按命中可能性从高到低）——用于商品【标题】搜索，"
+    "每个必须是单个单词，一个关键词只表达一个概念，"
     "禁止组合成短语（グリモワール 衣装 ✗ → グリモワール ✓）——"
-    "Booth 搜索单个精确名词时命中率最高；\n"
-    "2. 专有名词/商品名/角色名按日本市场实际写法输出：外来语给片假名完整转写"
+    "Booth 搜索单个精确名词时命中率最高：\n"
+    "1. 专有名词/商品名/角色名/素体名按日本市场实际写法输出：外来语给片假名完整转写"
     "（chocolate dress → ショコラドレス 级别的完整形），人名给片假名与常见汉字两种；\n"
+    "2. 部位/用途类需求转成日本圈行业词（尾巴→尻尾/しっぽ/テイル，耳朵→みみ/耳，"
+    "眼镜→メガネ，动画/表情功能→ギミック/アニメーション）；\n"
     "3. 类型概念用行业单词（3Dモデル/衣装/髪型/アクセサリ/ギミック/テクスチャ等）；\n"
-    "4. 按命中可能性从高到低排序；只输出 JSON："
-    '{"keywords": ["单词1", "单词2", "单词3", "单词4", "单词5", "单词6", "单词7", "单词8"]}'
+    "desc_keywords（0-3 个）——『适用于/対応/兼容某素体、支持某功能』这类兼容性需求的"
+    "核实词：Booth 把对应信息写在商品【说明文】的 対応素体/仕様 段落而非标题，"
+    "把要核实的素体名/功能名放这里（按日本市场原名写法）。无此类需求给空数组。"
 )
 
 _KANA_RE = re.compile(r"[\u3040-\u30ff]")
@@ -301,9 +330,9 @@ def _looks_chinese(text: str) -> bool:
 
 async def translate_keywords(text: str, *, base_url: str, api_key: str,
                              model: str, session_id: str = "",
-                             timeout: int = 60) -> list:
-    """中文需求 → 日语搜索关键词列表。输出不含 JSON 时带强化指令重试一次；
-    HTTP/解析失败抛异常，由调用方退化。"""
+                             timeout: int = 60) -> tuple[list, list]:
+    """中文需求 → (日语标题关键词, 描述核实关键词)。输出不含 JSON 时带强化指令
+    重试一次；HTTP/解析失败抛异常，由调用方退化。"""
     guard_api_base(base_url)
     url = base_url.rstrip("/") + "/chat/completions"
     prompt = f"{_TRANSLATE_PROMPT}\n用户需求：{text}"
@@ -317,9 +346,9 @@ async def translate_keywords(text: str, *, base_url: str, api_key: str,
             "max_tokens": 2000,
         }
         content = await _api_post(url, payload, api_key, session_id, timeout)
-        kws, _ = parse_keywords(content)
+        kws, dkws = parse_translation(content)
         if kws and re.search(r"\{.*\}", content, re.S):
-            return kws
+            return kws, dkws
     raise RuntimeError(f"翻译输出无法解析: {content[-160:]}")
 
 
@@ -360,17 +389,17 @@ def _cli_run_sync(bin_path: str, args: list, timeout: int) -> str:
 
 
 async def translate_keywords_cli(text: str, *, bin_path: str, model: str,
-                                 timeout: int = 90) -> list:
-    """CLI 后端：中文需求 → 日语关键词。输出必须含 JSON，否则视为失败。"""
+                                 timeout: int = 90) -> tuple[list, list]:
+    """CLI 后端：中文需求 → (标题关键词, 描述核实关键词)。输出必须含 JSON，否则视为失败。"""
     prompt = f"{_TRANSLATE_PROMPT}\n用户需求：{text}"
     out = await asyncio.to_thread(
         _cli_run_sync, bin_path, ["-m", model, prompt], timeout)
     if not re.search(r"\{.*\}", out, re.S):
         raise RuntimeError(f"opencode 翻译输出不含 JSON: {out[-160:]}")
-    kws, _ = parse_keywords(out)
+    kws, dkws = parse_translation(out)
     if not kws:
         raise RuntimeError(f"opencode 翻译输出无法解析: {out[-160:]}")
-    return kws
+    return kws, dkws
 
 
 async def extract_keywords_cli(image_path: str, *, hint: str = "",

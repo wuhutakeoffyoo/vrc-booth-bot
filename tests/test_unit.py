@@ -149,8 +149,9 @@ class TestVision(unittest.TestCase):
             finally:
                 v.httpx.AsyncClient = orig
 
-        kws = asyncio.run(run())
+        kws, dkws = asyncio.run(run())
         self.assertEqual(kws, ["猫耳", "メイド服", "3D衣装"])
+        self.assertEqual(dkws, [])  # 旧式无 desc_keywords 的输出兼容
         self.assertIn("/chat/completions", captured["url"])
         self.assertEqual(captured["json"]["model"], "test-model")
         self.assertIn("猫娘女仆装", captured["json"]["messages"][0]["content"])
@@ -171,10 +172,11 @@ class TestVision(unittest.TestCase):
             return P()
 
         with mock.patch("subprocess.run", fake_run):
-            kws = asyncio.run(vision.translate_keywords_cli(
+            kws, dkws = asyncio.run(vision.translate_keywords_cli(
                 "猫娘女仆装", bin_path="/fake/opencode",
                 model="opencode/mimo-v2.6-flash-free", timeout=30))
         self.assertEqual(kws, ["猫耳", "メイド服"])
+        self.assertEqual(dkws, [])
 
     def test_cli_backend_failure_raises(self):
         import asyncio
@@ -252,6 +254,28 @@ class TestVision(unittest.TestCase):
         self.assertIn("额度不足", vision.friendly_ai_error(
             RuntimeError("opencode run 失败: Insufficient account funds")))
 
+
+    def test_parse_translation_desc_keywords(self):
+        kws, dkws = vision.parse_translation(
+            '```json\n{"keywords": ["ショコラドレス", "衣装"], '
+            '"desc_keywords": ["Rexouium", "対応素体"]}\n```')
+        self.assertEqual(kws, ["ショコラドレス", "衣装"])
+        self.assertEqual(dkws, ["Rexouium", "対応素体"])
+
+    def test_parse_translation_no_desc(self):
+        kws, dkws = vision.parse_translation('{"keywords": ["尻尾"]}')
+        self.assertEqual(kws, ["尻尾"])
+        self.assertEqual(dkws, [])
+
+    def test_parse_translation_fallback_no_json(self):
+        kws, dkws = vision.parse_translation("尻尾\nしっぽ\nテイル")
+        self.assertIn("尻尾", kws)
+        self.assertEqual(dkws, [])
+
+    def test_parse_translation_desc_capped(self):
+        _, dkws = vision.parse_translation(
+            '{"keywords": ["x"], "desc_keywords": ["a", "b", "c", "d", "e"]}')
+        self.assertEqual(len(dkws), 3)
 
     def test_expand_reading_variants(self):
         has_pykakasi = True

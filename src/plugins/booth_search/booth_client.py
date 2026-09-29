@@ -93,10 +93,12 @@ def search(query: str | list, *, limit: int = 5, sort: str = "popularity",
     return call_booth("search", params, cli_path=cli_path, timeout=timeout)
 
 
-def item(item_id, *, no_cache: bool = False, cli_path: str = "",
-         timeout: int = 60) -> dict:
-    return call_booth("item", {"id": item_id, "no_cache": no_cache},
-                      cli_path=cli_path, timeout=timeout)
+def item(item_id, *, no_cache: bool = False, desc_len: int | None = None,
+         cli_path: str = "", timeout: int = 60) -> dict:
+    params = {"id": item_id, "no_cache": no_cache}
+    if desc_len is not None:
+        params["desc_len"] = desc_len
+    return call_booth("item", params, cli_path=cli_path, timeout=timeout)
 
 
 def imgsearch(image_path: str, *, headless: bool = True,
