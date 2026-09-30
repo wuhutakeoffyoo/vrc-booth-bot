@@ -104,6 +104,31 @@ class TestVision(unittest.TestCase):
         self.assertFalse(vision._looks_chinese("シエル 3Dモデル"))       # 假名=日语
         self.assertFalse(vision._looks_chinese("Ciel avatar"))           # 纯英文
 
+    def test_parse_plan(self):
+        kws, dkws, translated = vision.parse_plan(
+            '```json\n{"keywords": ["鈴", "ベル"], "desc_keywords": ["Rexouium"], '
+            '"translated": true}\n```')
+        self.assertEqual(kws, ["鈴", "ベル"])
+        self.assertEqual(dkws, ["Rexouium"])
+        self.assertTrue(translated)
+        kws, dkws, translated = vision.parse_plan(
+            '{"keywords": ["シエル"], "translated": false}')
+        self.assertEqual(kws, ["シエル"])
+        self.assertFalse(translated)
+
+    def test_parse_evaluation(self):
+        ev = vision.parse_evaluation(
+            '{"verdict": "retry", "reason": "返回的是鸟居", '
+            '"keywords": ["鈴", "ベル"]}')
+        self.assertEqual(ev["verdict"], "retry")
+        self.assertIn("鸟居", ev["reason"])
+        self.assertEqual(ev["keywords"], ["鈴", "ベル"])
+        ev = vision.parse_evaluation('{"verdict": "ok", "reason": "命中"}')
+        self.assertEqual(ev["verdict"], "ok")
+        self.assertEqual(ev["keywords"], [])
+        with self.assertRaises(RuntimeError):
+            vision.parse_evaluation("没有 json 的输出")
+
     def test_translate_keywords_parse(self):
         # mock HTTP：校验 payload 与关键词解析
         import asyncio

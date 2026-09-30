@@ -495,19 +495,24 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
 
 async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
                             desc_kws: list, page: int, page_note: str,
-                            ai_note: str = "") -> dict:
+                            ai_note: str = "",
+                            extra_notes: list | None = None) -> dict:
     """AI 关键词搜索的统一出口：可选描述核实重排 → 补详情 → 组装返回。
 
     desc_kws 非空时（『适用于XX素体』类需求）拉大详情池、简介扩长，
     按商品说明文匹配置顶——兼容信息（対応素体/仕様）写在说明里而非标题，
     只搜标题永远碰不到；核实结果在 header 里注明，让用户知道降级与否。
+    extra_notes（评估结论等）追加进 header 与 notes。
     """
     cfg = plugin_config
+    extra_notes = extra_notes or []
     shown = min(len(merged), cfg.booth_limit)
     sn = res.get("sort_note") or ""
     header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
               if res.get("total") else f"前 {shown}:{page_note}{sn}")
     header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
+    for note in extra_notes:
+        header += f"\n{note}"
     if not desc_kws and len(merged) > cfg.booth_limit:
         # 标题命中足够时丢弃不相关填充：多词合并会把其他词的 popularity 结果
         # 混进来，没有本裁剪时「铃铛」会带回鸟居/泳装这类完全无关的商品
@@ -527,111 +532,154 @@ async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
         await _enrich_entries(merged[:cfg.booth_limit])
     return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
             "entries": merged, "header": header,
-            "notes": [ai_note] if ai_note else [],
+            "notes": ([ai_note] if ai_note else []) + extra_notes,
             "page": page, "qhint": hint, "total": res.get("total")}
 
 
-async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> dict:
-    """文本搜索入口：中文需求并行执行 AI 翻译与知名商品回忆，合并搜索；
-    翻译同时产出 desc_keywords（说明文核实词，『适用于XX素体』类需求用）；
-    直搜空结果也会 AI 重试；失败时给用户准确原因并注明退化方式。
+async def _ai_plan(text: str) -> tuple[list, list, bool]:
+    """需求 → 搜索方案（主 api → 兜底 api）。都不可用抛 BoothUnavailable。
+    返回 (标题关键词, desc_keywords, 是否翻译)。"""
+    cfg = plugin_config
+    if cfg.vision_api_key:
+        try:
+            return await vision.plan_search(
+                text, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
+                model=cfg.vision_model, session_id=cfg.vision_session_id,
+                timeout=cfg.vision_timeout)
+        except Exception as e:
+            logger.warning(f"主 api 方案规划失败: {vision.friendly_ai_error(e)}")
+    if cfg.fallback_api_key:
+        try:
+            return await vision.plan_search(
+                text, base_url=cfg.fallback_base_url, api_key=cfg.fallback_api_key,
+                model=cfg.fallback_model, timeout=cfg.vision_timeout)
+        except Exception as e:
+            logger.warning(f"兜底 api 方案规划失败: {vision.friendly_ai_error(e)}")
+    raise BoothUnavailable("方案规划不可用（主/兜底 api）")
+
+
+async def _ai_evaluate(query: str, keywords: list, titles: list) -> dict:
+    """结果评估（主 api → 兜底 api）。都不可用抛 BoothUnavailable。"""
+    cfg = plugin_config
+    if cfg.vision_api_key:
+        try:
+            return await vision.evaluate_results(
+                query, keywords, titles, base_url=cfg.vision_base_url,
+                api_key=cfg.vision_api_key, model=cfg.vision_model,
+                session_id=cfg.vision_session_id, timeout=cfg.vision_timeout)
+        except Exception as e:
+            logger.warning(f"主 api 结果评估失败: {vision.friendly_ai_error(e)}")
+    if cfg.fallback_api_key:
+        try:
+            return await vision.evaluate_results(
+                query, keywords, titles, base_url=cfg.fallback_base_url,
+                api_key=cfg.fallback_api_key, model=cfg.fallback_model,
+                timeout=cfg.vision_timeout)
+        except Exception as e:
+            logger.warning(f"兜底 api 结果评估失败: {vision.friendly_ai_error(e)}")
+    raise BoothUnavailable("结果评估不可用（主/兜底 api）")
+
+
+async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
+                       notify=None) -> dict:
+    """文本搜索入口（智能体化链路）：
+    阶段 1 搜索方案——LLM 理解需求并自行决定是否翻译（翻译只是可选项）；
+    阶段 2 结果评估——LLM 对照需求评估候选，不满意给第二轮关键词，
+    经 notify 通知「正在执行第二次搜索」后重搜；
+    阶段 3 再评估——确认命中或如实说明。AI 不可用时退化为原词分词直搜。
+    notify: 可选异步回调（QQ 侧传 matcher.send），用于过程通知。
     返回 {"text", "entries", "header", "notes"}。"""
     cfg = plugin_config
     page_note = f"（第 {page} 页）" if page > 1 else ""
     ai_mode, _ = _ai_backend()
-    ai_ready = bool(ai_mode)
-    ai_note = ""
-    zh_attempted = False
+    ai_ready = ai_mode == "api"
+    ai_notes: list = []
 
-    if (ai_ready and vision._looks_chinese(hint)
-            and not re.search(r"[A-Za-z]{4,}", hint)):
-        # 含 4 字以上拉丁词（商品原名/罗马字）时不走翻译——百样本实测原词直搜
-        # 命中率远高于 AI 翻译（Top1 5/7 vs 0），翻译仅作空结果兜底
-        zh_attempted = True
+    async def _notify(msg: str):
+        if notify is None:
+            return
+        try:
+            await notify(msg)
+        except Exception as e:
+            logger.warning(f"过程通知发送失败: {e}")
 
-        async def _translate_task():
-            try:
-                kws, dkws = await _ai_translate(hint)
-                return kws, dkws, ""
-            except Exception as e:
-                reason = vision.friendly_ai_error(e)
-                logger.warning(f"中文关键词 AI 翻译失败（用原词直搜）: {e}")
-                return [], [], f"⚠ AI 翻译不可用：{reason}（已用原词直搜）"
+    # 阶段 1：搜索方案（翻译由模型自行决定，不再是固定步骤）
+    kws: list = []
+    desc_kws: list = []
+    if ai_ready:
+        try:
+            kws, desc_kws, translated = await _ai_plan(hint)
+            logger.info(f"搜索方案: {kws} (translated={translated}, desc={desc_kws})")
+        except Exception as e:
+            logger.warning(f"AI 方案规划失败（用原词检索）: {e}")
+            ai_notes.append(f"⚠ AI 方案规划不可用：{vision.friendly_ai_error(e)}（已用原词检索）")
+    if kws:
+        kws = vision.expand_reading_variants(kws)
 
-        async def _recall_task():
-            if not cfg.recall_enabled:
-                return []
-            try:
-                return await _ai_recall(hint)
-            except Exception as e:
-                logger.warning(f"知名商品回忆失败: {e}")
-                return []
+    merged, res = await _search_merged(kws or [hint], adult, page)
+    if not merged and kws:
+        # 方案词无果，退回原词直搜（日文输入时方案词可能反而偏）
+        merged, res2 = await _search_merged([hint], adult, page)
+        if res2.get("total") and not res.get("total"):
+            res = res2
 
-        # 翻译与回忆相互独立，并行发起（省一轮 AI 等待）
-        (kws0, desc_kws, ai_note), rk_raw = await asyncio.gather(_translate_task(), _recall_task())
-        rk = [k for k in rk_raw if k.lower() not in {x.lower() for x in kws0}][:2]
-        # 翻译词在前、回忆词殿后：回忆给的是「具体商品名」，对铃铛/猫耳这类日常
-        # 泛称多半是半编造的，拿去当搜索词只会带回 popularity 垃圾
-        kws = vision.expand_reading_variants(kws0 + rk)
-        if kws:
-            merged, res = await _search_merged(kws, adult, page)
-            if merged:
-                return await _merged_zh_result(hint, merged, res, kws, desc_kws,
-                                               page, page_note, ai_note)
+    # 标题裁剪（desc 空时）：标题命中足够即丢弃不相关填充，评估看的就是裁剪后的候选
+    if not desc_kws and len(merged) > cfg.booth_limit:
+        low = [k.lower() for k in (kws or [hint]) if k]
+        matched = [it for it in merged
+                   if any(k in (it.get("name") or "").lower() for k in low)]
+        if len(matched) >= cfg.booth_limit:
+            merged = matched
 
-    # 原词直搜；中文路径无果时不再重复翻译，非中文空结果走 AI 关键词重试
-    sort, sort_note = _effective_sort(page)
-    try:
-        res = booth_client.search(hint, limit=cfg.booth_limit, sort=sort,
-                                  adult=adult or cfg.r18_mode, page=page,
-                                  cli_path=cfg.booth_cli_path,
-                                  timeout=cfg.search_timeout)
-    except booth_client.BoothCliError as e:
-        logger.warning(f"原词直搜无结果({hint}): {e}")
-        res = {"items": [], "total": 0}
-    if (res.get("items") or []) or not ai_ready or zh_attempted:
-        items = res.get("items") or []
-        if not items:
-            web_entries = await _webfind_entries(hint, [hint])
-            if web_entries:
-                text = format_results(web_entries, max_n=3,
-                                      title=f"网络检索命中（站内无「{hint}」）:")
-                return {"text": text, "entries": web_entries}
-            msg = f"Booth 上没搜到「{hint}」{page_note}（共 {res.get('total') or 0} 件）"
-            return {"text": f"{msg}\n{ai_note}" if ai_note else msg, "entries": []}
-        total = (f"共 {res['total']:,} 件，显示前 {len(items)}:{page_note}{sort_note}"
-                 if res.get("total") else f"前 {len(items)}:{page_note}{sort_note}")
-        for it in items:
-            it.setdefault("via", "")
-        await _enrich_entries(items[:cfg.booth_limit])
-        text = format_results(items, max_n=cfg.booth_limit, title=total)
-        return {"text": f"{text}\n{ai_note}" if ai_note else text,
-                "entries": items, "header": total,
-                "notes": [ai_note] if ai_note else [],
-                "page": page, "qhint": hint, "total": res.get("total")}
+    # 阶段 2：结果评估——不满意则第二轮搜索；阶段 3 再评估
+    eval_note = ""
+    if merged and ai_ready:
+        try:
+            titles = [f"{i}. {(it.get('name') or '(标题未知)')[:44]}"
+                      for i, it in enumerate(merged[:12], 1)]
+            ev = await _ai_evaluate(hint, kws or [hint], titles)
+            logger.info(f"第一轮评估: {ev.get('verdict')} {ev.get('reason')}")
+            if ev.get("verdict") == "retry" and ev.get("keywords"):
+                await _notify("第一轮结果不太对，正在执行第二轮搜索…")
+                kws2 = vision.expand_reading_variants(ev["keywords"])[:6]
+                merged2, res2 = await _search_merged(kws2, adult, page)
+                if merged2:
+                    seen = {it["id"] for it in merged2}
+                    merged = merged2 + [it for it in merged if it["id"] not in seen]
+                    if res2.get("total"):
+                        res = res2
+                    # 阶段 3：再评估
+                    try:
+                        titles2 = [f"{i}. {(it.get('name') or '(标题未知)')[:44]}"
+                                   for i, it in enumerate(merged[:12], 1)]
+                        ev2 = await _ai_evaluate(hint, kws2, titles2)
+                        eval_note = ("第二轮结果已按需求确认" if ev2.get("verdict") == "ok"
+                                     else "两轮搜索后仍未完全确认，以下为最接近的结果"
+                                          "（可补充材质/颜色/用途等描述再试）")
+                    except Exception as e2:
+                        logger.warning(f"第二轮评估失败: {e2}")
+                        eval_note = "已完成第二轮搜索"
+                else:
+                    eval_note = "第二轮搜索无结果，以下保留第一轮结果"
+        except Exception as e:
+            logger.warning(f"结果评估失败（按第一轮返回）: {e}")
 
-    try:
-        kws, desc_kws = await _ai_translate(hint)
-        kws = vision.expand_reading_variants(kws)  # 汉字词追加假名读音变体
-    except Exception as e:
-        reason = vision.friendly_ai_error(e)
-        logger.warning(f"AI 关键词翻译失败: {e}")
-        msg = f"Booth 上没搜到「{hint}」{page_note}（共 {res.get('total') or 0} 件）"
-        return {"text": f"{msg}\n⚠ AI 翻译不可用：{reason}", "entries": []}
-    if not kws:
-        return {"text": f"Booth 上没搜到「{hint}」{page_note}（共 {res.get('total') or 0} 件）",
-                "entries": []}
-    merged, res = await _search_merged(kws, adult, page)
     if not merged:
-        web_entries = await _webfind_entries(hint, kws)
+        web_entries = await _webfind_entries(hint, kws or [hint])
         if web_entries:
             return {"text": format_results(web_entries, max_n=3,
-                    title="网络检索命中（站内搜索无果，供参考）:"),
-                    "entries": web_entries}
-        text = (f"Booth 上没搜到「{hint}」{page_note}，"
-                f"AI 关键词（{' / '.join(kws[:3])}）也未命中")
-        return {"text": text, "entries": []}
-    return await _merged_zh_result(hint, merged, res, kws, desc_kws, page, page_note)
+                    title=f"网络检索命中（站内无「{hint}」）:"), "entries": web_entries}
+        msg = f"Booth 上没搜到「{hint}」{page_note}"
+        if kws:
+            msg += f"，AI 关键词（{' / '.join(kws[:3])}）也未命中"
+        if ai_notes:
+            msg += "\n" + "\n".join(ai_notes)
+        return {"text": msg, "entries": []}
+
+    header_notes = ([eval_note] if eval_note else []) + ai_notes
+    return await _merged_zh_result(hint, merged, res, kws or [hint], desc_kws,
+                                   page, page_note, "; ".join(ai_notes),
+                                   extra_notes=([eval_note] if eval_note else []))
 
 
 async def _send_result(bot, event, result: dict, from_cache: bool = False):
@@ -703,8 +751,8 @@ async def _do_search(bot, event: MessageEvent):
                 await matcher.send("收到图片+提示，正在反查 Booth（10-60 秒）…")
             result = await _handle_image(urls[0], hint)
         else:
-            await matcher.send("Booth 搜索中，请稍候（中文查询含 AI 翻译，约 30-90 秒）…")
-            result = await _handle_text(hint, page=page)
+            await matcher.send("Booth 搜索中，请稍候（智能链路含 AI 规划与评估，约 30-120 秒）…")
+            result = await _handle_text(hint, page=page, notify=matcher.send)
     except booth_client.BoothCliError as e:
         result = {"text": f"搜索失败: {e}", "entries": []}
     except Exception as e:
@@ -747,7 +795,8 @@ async def _do_r18(bot, event: MessageEvent):
         await _send_result(bot, event, cached, from_cache=True)
         return
     try:
-        result = await _handle_text(hint, adult="only", page=page)
+        result = await _handle_text(hint, adult="only", page=page,
+                                    notify=r18_matcher.send)
     except booth_client.BoothCliError as e:
         result = {"text": f"搜索失败: {e}", "entries": []}
     except Exception as e:

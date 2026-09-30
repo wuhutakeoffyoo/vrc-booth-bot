@@ -293,6 +293,123 @@ async def extract_keywords(image_bytes: bytes, *, hint: str = "",
     return parse_keywords(content)
 
 
+# ---------------------------------------------------------------- 智能体化文本链路
+# 翻译不再是固定步骤：模型先做「搜索方案」（自行决定是否翻译），搜完后对候选
+# 做「结果评估」，不满意给第二轮关键词——由调用方重搜并再评估。
+
+_PLAN_PROMPT = (
+    "用户在 Booth.pm（日本同人/VRChat 素材市场）找商品。制定站内搜索方案，只输出 JSON："
+    '{"keywords": ["单词1", "单词2"], "desc_keywords": [], "translated": true}\n'
+    "keywords（最多 6 个，按命中可能性排序）——用于商品【标题】搜索：\n"
+    "1. 输入已是日文/罗马字/英文商品名：直接沿用或拆成单词，translated=false；\n"
+    "2. 输入是中文/口语需求：转成日语单词（一个关键词只表达一个概念，禁止短语；"
+    "专有名词按日本市场实际写法：外来语给完整片假名、素体名给原名；"
+    "部位/用途用行业词：尻尾/みみ/チョーカー/ギミック 等），translated=true；\n"
+    "3. 类型概念用行业单词（3Dモデル/衣装/髪型/アクセサリ/ギミック/テクスチャ等）。\n"
+    "desc_keywords（0-3 个）——『适用于/対応/兼容某素体、支持某功能』类需求需要到"
+    "商品说明文核实的具体素体名/功能名（禁止平台名或通用词：VRChat、3Dモデル、対応）。"
+    "无此类需求给空数组。"
+)
+
+_EVAL_PROMPT = (
+    "你是 Booth.pm（VRChat 素材市场）的搜索质量评估员。用户想找：『{query}』。"
+    "已用关键词【{keywords}】执行站内标题搜索，得到的候选商品标题如下：\n"
+    "{titles}\n"
+    "评估这些候选是否满足用户需求，只输出 JSON："
+    '{"verdict": "ok", "reason": "一句话理由", "keywords": []}\n'
+    "verdict=ok：候选中有符合需求方向的商品；\n"
+    "verdict=retry：候选明显偏离需求（例：想要铃铛却返回鸟居/泳装/发型）——"
+    "keywords 给第二轮搜索词（最多 6 个日语单词，吸取第一轮教训换更精确的行业词/"
+    "常见表记，不要重复第一轮明显无效的词）。"
+)
+
+
+def parse_plan(content: str) -> tuple[list, list, bool]:
+    """解析方案输出：(标题关键词, 描述核实关键词, 是否使用了翻译)。
+    JSON 优先，坏 JSON 退回按行拆（desc 空、translated 视为已转换）。"""
+    m = re.search(r"\{.*\}", content or "", re.S)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            kws = data.get("keywords") or []
+            if isinstance(kws, list):
+                clean = [str(k).strip() for k in kws
+                         if str(k).strip() and not _is_reasoning_prose(str(k))]
+                dkws = data.get("desc_keywords") or []
+                dclean = ([str(k).strip() for k in dkws
+                           if str(k).strip() and not _is_reasoning_prose(str(k))]
+                          if isinstance(dkws, list) else [])[:3]
+                return clean, dclean, bool(data.get("translated"))
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    parts = re.split(r"[\n,，、/|]+", content or "")
+    clean = [p.strip(" -·*") for p in parts
+             if len(p.strip(" -·*")) >= 2 and not _is_reasoning_prose(p)]
+    return clean[:8], [], True
+
+
+def parse_evaluation(content: str) -> dict:
+    """解析评估输出：{verdict, reason, keywords}；解析失败抛 RuntimeError
+    （调用方按「不可评估，用第一轮结果」降级）。"""
+    m = re.search(r"\{.*\}", content or "", re.S)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            verdict = str(data.get("verdict") or "").strip().lower()
+            reason = str(data.get("reason") or "").strip()[:80]
+            kws = data.get("keywords") or []
+            clean = ([str(k).strip() for k in kws
+                      if str(k).strip() and not _is_reasoning_prose(str(k))]
+                     if isinstance(kws, list) else [])
+            if verdict in ("ok", "retry"):
+                return {"verdict": verdict, "reason": reason, "keywords": clean[:6]}
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    raise RuntimeError(f"评估输出无法解析: {(content or '')[-160:]}")
+
+
+async def plan_search(text: str, *, base_url: str, api_key: str, model: str,
+                      session_id: str = "", timeout: int = 60) -> tuple[list, list, bool]:
+    """需求 → 搜索方案 (标题关键词, desc_keywords, 是否翻译)。
+    输出不含 JSON 时带强化指令重试一次；失败抛异常由调用方退化直搜。"""
+    guard_api_base(base_url)
+    url = base_url.rstrip("/") + "/chat/completions"
+    prompt = f"{_PLAN_PROMPT}\n用户搜索请求：{text}"
+    for attempt in range(2):
+        payload = {
+            "model": model,
+            "messages": [{"role": "user",
+                          "content": prompt + ("\n（再次提醒：只输出 JSON 本体，"
+                                               "不要输出任何解释或思考过程）" if attempt else "")}],
+            "temperature": 0.2,
+            "max_tokens": 2000,
+        }
+        content = await _api_post(url, payload, api_key, session_id, timeout)
+        kws, dkws, translated = parse_plan(content)
+        if kws and re.search(r"\{.*\}", content, re.S):
+            return kws, dkws, translated
+    raise RuntimeError(f"方案输出无法解析: {(content or '')[-160:]}")
+
+
+async def evaluate_results(query: str, keywords: list, titles: list, *,
+                           base_url: str, api_key: str, model: str,
+                           session_id: str = "", timeout: int = 60) -> dict:
+    """评估候选标题是否满足需求；verdict=retry 时 keywords 为第二轮搜索词。"""
+    guard_api_base(base_url)
+    url = base_url.rstrip("/") + "/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user",
+                      "content": _EVAL_PROMPT.replace("{query}", query)
+                      .replace("{keywords}", " / ".join(keywords))
+                      .replace("{titles}", "\n".join(titles))}],
+        "temperature": 0.2,
+        "max_tokens": 2000,
+    }
+    content = await _api_post(url, payload, api_key, session_id, timeout)
+    return parse_evaluation(content)
+
+
 # 中文/需求描述 → Booth 搜索方案的提示词：标题关键词 + 说明文核实词
 _TRANSLATE_PROMPT = (
     "用户在 Booth.pm（日本同人/VRChat 素材市场）找商品，输入的是中文口语/需求描述。"
