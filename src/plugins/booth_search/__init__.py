@@ -134,7 +134,8 @@ def _ai_backend() -> tuple[str, str]:
 
 
 async def _ai_translate(text: str) -> tuple[list, list]:
-    """中文需求 → 搜索方案 (标题关键词, 描述核实关键词)。
+    """【旧链路·归档未启用】中文需求 → 搜索方案 (标题关键词, 描述核实关键词)。
+    文本链路已改 _ai_plan（智能体化方案，翻译由模型自决）；本包装仅存档，
     主 api（Go 套餐）→ 兜底 api（GLM Coding Plan）→ cli（mimo free）逐级回落。"""
     cfg = plugin_config
     mode, param = _ai_backend()
