@@ -305,23 +305,89 @@ _PLAN_PROMPT = (
     "2. 输入是中文/口语需求：转成日语单词（一个关键词只表达一个概念，禁止短语；"
     "专有名词按日本市场实际写法：外来语给完整片假名、素体名给原名；"
     "部位/用途用行业词：尻尾/みみ/チョーカー/ギミック 等），translated=true；\n"
-    "3. 类型概念用行业单词（3Dモデル/衣装/髪型/アクセサリ/ギミック/テクスチャ等）。\n"
+    "3. 类型概念用行业单词（3Dモデル/衣装/髪型/アクセサリ/ギミック/テクスチャ等）；\n"
+    "4. 用 Booth 圈的实际行业词而非直译（对照示例：墨镜→サングラス 不是 メガネ＋黒，"
+    "枪械→銃/ガン，法线贴图→ノーマルマップ，卫衣→パーカー，项链→ネックレス）；\n"
+    "5. 圈内常见组合词整词给出（鈴チョーカー/猫耳セット 级别——它们是实际商品名的"
+    "高频形态，命中率高于拆开的单词）。\n"
     "desc_keywords（0-3 个）——『适用于/対応/兼容某素体、支持某功能』类需求需要到"
     "商品说明文核实的具体素体名/功能名（禁止平台名或通用词：VRChat、3Dモデル、対応）。"
     "无此类需求给空数组。"
 )
 
 _EVAL_PROMPT = (
-    "你是 Booth.pm（VRChat 素材市场）的搜索质量评估员。用户想找：『{query}』。"
-    "已用关键词【{keywords}】执行站内标题搜索，得到的候选商品标题如下：\n"
-    "{titles}\n"
-    "评估这些候选是否满足用户需求，只输出 JSON："
-    '{"verdict": "ok", "reason": "一句话理由", "keywords": []}\n'
-    "verdict=ok：候选中有符合需求方向的商品；\n"
-    "verdict=retry：候选明显偏离需求（例：想要铃铛却返回鸟居/泳装/发型）——"
-    "keywords 给第二轮搜索词（最多 6 个日语单词，吸取第一轮教训换更精确的行业词/"
-    "常见表记，不要重复第一轮明显无效的词）。"
+    "你是 Booth.pm（VRChat 素材市场）的搜索质量评估员，标准要严格——你是用户的代理，"
+    "替用户把关。用户想找：『{query}』。已用关键词【{keywords}】执行站内标题搜索，"
+    "候选商品标题如下：\n{titles}\n"
+    "逐条自问：若你是搜『{query}』的 VRChat 玩家，这条结果会让你想点开吗？"
+    "注意噪音模式：仅名字含检索词但品类完全不符（搜墨镜返回普通框架眼镜、"
+    "搜金属材质返回名字带 Metal 的衣服）、子串误命中（ベル→ベルト/ベルベット）、"
+    "品牌或人名沾边（Bell→Bella）。只输出 JSON：\n"
+    '{{"verdict": "ok", "hits": ["命中的候选编号或名称片段", ...], '
+    '"reason": "一句话理由", "keywords": []}}\n'
+    "verdict=ok 的硬性要求：hits 至少列出 3 条真正想点开的候选及原因；"
+    "凑不齐 3 条就判 retry。\n"
+    "verdict=retry：候选整体不满足需求——keywords 给第二轮搜索词"
+    "（最多 6 个日语单词，吸取第一轮教训换更精确的行业词/常见表记，"
+    "不要重复第一轮明显无效的词）。"
 )
+
+# 行业同义词种子表（盲测 13 个失败词沉淀）：中文泛称 → Booth 行业词。
+# 方案阶段命中键时把同义词插入关键词列表前部；主要靠提示词让模型举一反三，
+# 本表只兜模型仍漏的硬映射。维护策略：每次盲测的失败词按需追加。
+INDUSTRY_SYNONYMS = {
+    "墨镜": ["サングラス"],
+    "枪械": ["銃", "ガン"],
+    "獠牙": ["キバ"],
+    "眨眼": ["ウィンク", "まばたき"],
+    "座位": ["座り", "チェア"],
+    "发型切换": ["ヘア切り替え", "髪型ギミック"],
+    "亲亲": ["キス"],
+    "项链": ["ネックレス"],
+    "卫衣": ["パーカー"],
+    "短裙": ["スカート"],
+    "金属材质": ["メタル", "メタリック"],
+    "法线贴图": ["ノーマルマップ"],
+    "服装贴图": ["衣装テクスチャ"],
+}
+
+
+def apply_industry_synonyms(query: str, keywords: list) -> list:
+    """方案阶段后调用：query 命中同义词表时行业词插最前；关键词命中时同义词
+    紧随该关键词之后插入（保持模型给出的命中可能性排序）。纯函数；无命中保序返回。"""
+    def add_seen(s: str, seen: set, out: list) -> None:
+        if s and s.lower() not in seen:
+            seen.add(s.lower())
+            out.append(s)
+
+    q = str(query or "").strip()
+    seen: set = set()
+    out: list = []
+    for key, syns in INDUSTRY_SYNONYMS.items():
+        if key == q:
+            for s in syns:
+                add_seen(s, seen, out)
+    for kw in (str(k).strip() for k in (keywords or [])):
+        add_seen(kw, seen, out)
+        for key, syns in INDUSTRY_SYNONYMS.items():
+            if key == kw:
+                for s in syns:
+                    add_seen(s, seen, out)
+    return out
+
+
+def conservative_retry(verdict: str, titles: list, terms: list) -> bool:
+    """评估员放行但标题命中率过低的保守重试判定（纯函数）。
+    titles 为候选标题列表（按展示顺序），terms 为本轮实际使用的检索词。
+    命中率 = 标题含任一检索词的条数占比；评估为 ok 但占比 ≤ 1/3 时判定需要重搜。"""
+    if str(verdict).lower() != "ok" or not titles:
+        return False
+    low = [str(t).lower() for t in (terms or []) if t]
+    if not low:
+        return False
+    hit = sum(1 for t in titles
+              if any(k in str(t).lower() for k in low))
+    return hit * 3 <= len(titles)
 
 
 def parse_plan(content: str) -> tuple[list, list, bool]:
@@ -349,7 +415,7 @@ def parse_plan(content: str) -> tuple[list, list, bool]:
 
 
 def parse_evaluation(content: str) -> dict:
-    """解析评估输出：{verdict, reason, keywords}；解析失败抛 RuntimeError
+    """解析评估输出：{verdict, reason, hits, keywords}；解析失败抛 RuntimeError
     （调用方按「不可评估，用第一轮结果」降级）。"""
     m = re.search(r"\{.*\}", content or "", re.S)
     if m:
@@ -358,23 +424,32 @@ def parse_evaluation(content: str) -> dict:
             verdict = str(data.get("verdict") or "").strip().lower()
             reason = str(data.get("reason") or "").strip()[:80]
             kws = data.get("keywords") or []
+            hits = data.get("hits") or []
             clean = ([str(k).strip() for k in kws
                       if str(k).strip() and not _is_reasoning_prose(str(k))]
                      if isinstance(kws, list) else [])
+            clean_hits = ([str(h).strip()[:40] for h in hits
+                           if str(h).strip()]
+                          if isinstance(hits, list) else [])
             if verdict in ("ok", "retry"):
-                return {"verdict": verdict, "reason": reason, "keywords": clean[:6]}
+                return {"verdict": verdict, "reason": reason,
+                        "hits": clean_hits[:6], "keywords": clean[:6]}
         except (json.JSONDecodeError, AttributeError):
             pass
     raise RuntimeError(f"评估输出无法解析: {(content or '')[-160:]}")
 
 
 async def plan_search(text: str, *, base_url: str, api_key: str, model: str,
-                      session_id: str = "", timeout: int = 60) -> tuple[list, list, bool]:
+                      session_id: str = "", timeout: int = 60,
+                      feedback: str = "") -> tuple[list, list, bool]:
     """需求 → 搜索方案 (标题关键词, desc_keywords, 是否翻译)。
+    feedback：保守重试场景下告知第一轮教训，让模型换更精确的词。
     输出不含 JSON 时带强化指令重试一次；失败抛异常由调用方退化直搜。"""
     guard_api_base(base_url)
     url = base_url.rstrip("/") + "/chat/completions"
     prompt = f"{_PLAN_PROMPT}\n用户搜索请求：{text}"
+    if feedback:
+        prompt += f"\n上一轮搜索经验：{feedback}\n请据此换用更精确的行业词，避免重复无效词。"
     for attempt in range(2):
         payload = {
             "model": model,

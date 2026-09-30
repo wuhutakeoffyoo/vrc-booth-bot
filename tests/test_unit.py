@@ -129,6 +129,69 @@ class TestVision(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             vision.parse_evaluation("没有 json 的输出")
 
+    def test_parse_evaluation_hits(self):
+        ev = vision.parse_evaluation(
+            '{"verdict": "ok", "hits": ["チョーカー", "首輪", "3. ネックレス"], '
+            '"reason": "多条命中"}')
+        self.assertEqual(ev["verdict"], "ok")
+        self.assertEqual(len(ev["hits"]), 3)
+
+    def test_apply_industry_synonyms(self):
+        out = vision.apply_industry_synonyms("墨镜", ["サングラス"])
+        self.assertEqual(out, ["サングラス"])  # 已含不重复
+        out = vision.apply_industry_synonyms("枪械", ["銃"])
+        self.assertIn("ガン", out)
+        self.assertEqual(out[0], "銃")
+        self.assertEqual(vision.apply_industry_synonyms("猫耳", ["ネコミミ"]),
+                         ["ネコミミ"])  # 无命中原样返回
+
+    def test_conservative_retry(self):
+        titles = ["ベルト", "ピストルベルト", "Bell Hair",
+                  "Bella", "x", "y"]
+        # 评估放行但 6 条中仅 2 条子串沾边 → 保守 retry
+        self.assertTrue(vision.conservative_retry("ok", titles, ["ベル"]))
+        # 标题命中过半 → 不 retry
+        self.assertFalse(vision.conservative_retry(
+            "ok", ["チョーカー", "首輪風チョーカー", "レッグチョーカー", "x", "y", "z"],
+            ["チョーカー"]))
+        # verdict=retry 时不走本函数（调用方直接二轮）
+        self.assertFalse(vision.conservative_retry("retry", titles, ["ベル"]))
+        self.assertFalse(vision.conservative_retry("ok", [], ["x"]))
+
+    def test_plan_search_feedback_in_prompt(self):
+        # feedback 拼进 prompt（mock HTTP 校验）
+        import asyncio
+
+        captured = {}
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content":
+                        '{"keywords": ["サングラス"], "translated": true}'}}]}
+
+        async def run():
+            async def fake_post(url, payload, api_key, session_id, timeout):
+                captured["content"] = payload["messages"][0]["content"]
+                return FakeResp().json()["choices"][0]["message"]["content"]
+            orig = vision._api_post
+            vision._api_post = fake_post
+            try:
+                return await vision.plan_search(
+                    "墨镜", base_url="https://example.test/v1",
+                    api_key="k", model="m",
+                    feedback="关键词 メガネ 无效")
+            finally:
+                vision._api_post = orig
+
+        kws, dkws, tr = asyncio.run(run())
+        self.assertEqual(kws, ["サングラス"])
+        self.assertTrue(tr)
+        self.assertIn("上一轮搜索经验", captured["content"])
+        self.assertIn("メガネ 无效", captured["content"])
+
     def test_translate_keywords_parse(self):
         # mock HTTP：校验 payload 与关键词解析
         import asyncio

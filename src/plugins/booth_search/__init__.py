@@ -451,7 +451,9 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
     for kw in kws[:6]:
         for tok in re.split(r"[\s/、，,]+", str(kw)):
             tok = tok.strip()
-            if len(tok) >= 2 and tok not in seen_t:
+            # CJK 单字是合法词（鈴/耳），仅丢弃单字节/单字母噪音
+            if (len(tok) >= 2 or (len(tok) == 1 and ord(tok) > 0x2E80)) \
+                    and tok not in seen_t:
                 seen_t.add(tok)
                 terms.append(tok)
         whole = str(kw).strip()
@@ -486,8 +488,13 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
                 merged.append(it)
     low_kws = [k.lower() for k in terms if k]
     if low_kws:
-        merged.sort(key=lambda it: not any(
-            k in (it.get("name") or "").lower() for k in low_kws))
+        # 命中更多检索词的优先；同分内按首个命中词序位（鈴 优先于 ベル 的子串噪音）
+        def _rank(it):
+            name = (it.get("name") or "").lower()
+            hit_idx = [i for i, k in enumerate(low_kws) if k in name]
+            return (-len(hit_idx), hit_idx[0] if hit_idx else len(low_kws))
+
+        merged.sort(key=_rank)
     if sort_note:
         first_res = dict(first_res or {})
         first_res["sort_note"] = sort_note
@@ -537,23 +544,24 @@ async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
             "page": page, "qhint": hint, "total": res.get("total")}
 
 
-async def _ai_plan(text: str) -> tuple[list, list, bool]:
+async def _ai_plan(text: str, feedback: str = "") -> tuple[list, list, bool]:
     """需求 → 搜索方案（主 api → 兜底 api）。都不可用抛 BoothUnavailable。
-    返回 (标题关键词, desc_keywords, 是否翻译)。"""
+    feedback：保守重试场景告知第一轮教训。返回 (标题关键词, desc_keywords, 是否翻译)。"""
     cfg = plugin_config
     if cfg.vision_api_key:
         try:
             return await vision.plan_search(
                 text, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
                 model=cfg.vision_model, session_id=cfg.vision_session_id,
-                timeout=cfg.vision_timeout)
+                timeout=cfg.vision_timeout, feedback=feedback)
         except Exception as e:
             logger.warning(f"主 api 方案规划失败: {vision.friendly_ai_error(e)}")
     if cfg.fallback_api_key:
         try:
             return await vision.plan_search(
                 text, base_url=cfg.fallback_base_url, api_key=cfg.fallback_api_key,
-                model=cfg.fallback_model, timeout=cfg.vision_timeout)
+                model=cfg.fallback_model, timeout=cfg.vision_timeout,
+                feedback=feedback)
         except Exception as e:
             logger.warning(f"兜底 api 方案规划失败: {vision.friendly_ai_error(e)}")
     raise BoothUnavailable("方案规划不可用（主/兜底 api）")
@@ -615,6 +623,8 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
             logger.warning(f"AI 方案规划失败（用原词检索）: {e}")
             ai_notes.append(f"⚠ AI 方案规划不可用：{vision.friendly_ai_error(e)}（已用原词检索）")
     if kws:
+        # 行业同义词种子层：泛称直译漏掉的硬映射（墨镜→サングラス 等）
+        kws = vision.apply_industry_synonyms(hint, kws)
         kws = vision.expand_reading_variants(kws)
 
     merged, res = await _search_merged(kws or [hint], adult, page)
@@ -634,51 +644,69 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
 
     # 阶段 2：结果评估——不满意则第二轮搜索；阶段 3 再评估
     eval_note = ""
+    used_terms = kws or [hint]
     if merged and ai_ready:
         try:
             titles = [f"{i}. {(it.get('name') or '(标题未知)')[:44]}"
                       for i, it in enumerate(merged[:12], 1)]
-            ev = await _ai_evaluate(hint, kws or [hint], titles)
+            ev = await _ai_evaluate(hint, used_terms, titles)
             logger.info(f"第一轮评估: {ev.get('verdict')} {ev.get('reason')}")
-            if ev.get("verdict") == "retry" and ev.get("keywords"):
+            # 保守 retry：评估员放行但标题命中率过低时仍触发二轮
+            need_retry = (ev.get("verdict") == "retry" and bool(ev.get("keywords"))) or \
+                vision.conservative_retry(ev.get("verdict", ""),
+                                          [it.get("name") or "" for it in merged[:6]],
+                                          used_terms)
+            if need_retry:
                 await _notify("第一轮结果不太对，正在执行第二轮搜索…")
-                kws2 = vision.expand_reading_variants(ev["keywords"])[:6]
-                merged2, res2 = await _search_merged(kws2, adult, page)
-                if merged2:
-                    seen = {it["id"] for it in merged2}
-                    merged = merged2 + [it for it in merged if it["id"] not in seen]
-                    if res2.get("total"):
-                        res = res2
-                    # 阶段 3：再评估
-                    try:
-                        titles2 = [f"{i}. {(it.get('name') or '(标题未知)')[:44]}"
-                                   for i, it in enumerate(merged[:12], 1)]
-                        ev2 = await _ai_evaluate(hint, kws2, titles2)
-                        eval_note = ("第二轮结果已按需求确认" if ev2.get("verdict") == "ok"
-                                     else "两轮搜索后仍未完全确认，以下为最接近的结果"
-                                          "（可补充材质/颜色/用途等描述再试）")
-                    except Exception as e2:
-                        logger.warning(f"第二轮评估失败: {e2}")
-                        eval_note = "已完成第二轮搜索"
+                if ev.get("keywords"):
+                    kws2 = vision.expand_reading_variants(ev["keywords"])[:6]
                 else:
-                    eval_note = "第二轮搜索无结果，以下保留第一轮结果"
+                    # 评估没给词：带教训重新规划
+                    try:
+                        kws2, _, _ = await _ai_plan(
+                            hint, feedback=f"关键词 {used_terms[:4]} 无效（{ev.get('reason') or '候选不相关'}）")
+                        kws2 = vision.expand_reading_variants(kws2)[:6]
+                    except Exception as e2:
+                        logger.warning(f"二轮重新规划失败: {e2}")
+                        kws2 = []
+                if kws2:
+                    merged2, res2 = await _search_merged(kws2, adult, page)
+                    if merged2:
+                        seen = {it["id"] for it in merged2}
+                        merged = merged2 + [it for it in merged if it["id"] not in seen]
+                        used_terms = kws2
+                        if res2.get("total"):
+                            res = res2
+                        # 阶段 3：再评估
+                        try:
+                            titles2 = [f"{i}. {(it.get('name') or '(标题未知)')[:44]}"
+                                       for i, it in enumerate(merged[:12], 1)]
+                            ev2 = await _ai_evaluate(hint, used_terms, titles2)
+                            eval_note = ("第二轮结果已按需求确认" if ev2.get("verdict") == "ok"
+                                         else "两轮搜索后仍未完全确认，以下为最接近的结果"
+                                              "（可补充材质/颜色/用途等描述再试）")
+                        except Exception as e2:
+                            logger.warning(f"第二轮评估失败: {e2}")
+                            eval_note = "已完成第二轮搜索"
+                    else:
+                        eval_note = "第二轮搜索无结果，以下保留第一轮结果"
         except Exception as e:
             logger.warning(f"结果评估失败（按第一轮返回）: {e}")
 
     if not merged:
-        web_entries = await _webfind_entries(hint, kws or [hint])
+        web_entries = await _webfind_entries(hint, used_terms)
         if web_entries:
             return {"text": format_results(web_entries, max_n=3,
                     title=f"网络检索命中（站内无「{hint}」）:"), "entries": web_entries}
         msg = f"Booth 上没搜到「{hint}」{page_note}"
-        if kws:
-            msg += f"，AI 关键词（{' / '.join(kws[:3])}）也未命中"
+        if used_terms:
+            msg += f"，AI 关键词（{' / '.join(used_terms[:3])}）也未命中"
         if ai_notes:
             msg += "\n" + "\n".join(ai_notes)
         return {"text": msg, "entries": []}
 
     header_notes = ([eval_note] if eval_note else []) + ai_notes
-    return await _merged_zh_result(hint, merged, res, kws or [hint], desc_kws,
+    return await _merged_zh_result(hint, merged, res, used_terms, desc_kws,
                                    page, page_note, "; ".join(ai_notes),
                                    extra_notes=([eval_note] if eval_note else []))
 
