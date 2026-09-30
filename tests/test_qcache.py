@@ -44,5 +44,18 @@ class TestQCache(unittest.TestCase):
         self.assertIsNone(qcache.get("old", 600))    # 过期行被清理
 
 
+    def test_version_salt_invalidates_old_entries(self):
+        key = qcache.make_key("vx")
+        qcache.put(key, {"a": 1}, ttl=600)
+        self.assertIsNotNone(qcache.get(key, 600))
+        old = qcache.CACHE_VERSION
+        qcache.CACHE_VERSION = old + "_bump"
+        try:
+            # 版本升级后 make_key 产出新前缀，旧条目不再命中
+            self.assertIsNone(qcache.get(qcache.make_key("vx"), 600))
+        finally:
+            qcache.CACHE_VERSION = old
+
+
 if __name__ == "__main__":
     unittest.main()

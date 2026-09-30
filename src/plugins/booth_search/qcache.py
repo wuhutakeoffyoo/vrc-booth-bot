@@ -29,9 +29,15 @@ def _db():
     return _conn if _conn else None
 
 
+# 结果语义版本：前缀进缓存 key。凡影响结果内容的代码变更（策略/格式/修复）部署时
+# 必须递增，让旧缓存整体失效——否则新代码上线后 TTL 内用户拿到的仍是修复前
+# 的旧结果（2026-09-30「铃铛」事故：修复已上线，用户却命中旧缓存以为没优化）
+CACHE_VERSION = "2"
+
+
 def make_key(*parts) -> str:
-    """缓存 key：各部分小写化拼接（顺序稳定）。"""
-    return "|".join(str(p).strip().lower() for p in parts if p is not None)
+    """缓存 key：版本前缀 + 各部分小写化拼接（顺序稳定）。"""
+    return CACHE_VERSION + "|" + "|".join(str(p).strip().lower() for p in parts if p is not None)
 
 
 def get(key: str, ttl: int):
