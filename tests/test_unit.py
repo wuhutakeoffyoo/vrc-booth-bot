@@ -140,10 +140,21 @@ class TestVision(unittest.TestCase):
         out = vision.apply_industry_synonyms("墨镜", ["サングラス"])
         self.assertEqual(out, ["サングラス"])  # 已含不重复
         out = vision.apply_industry_synonyms("枪械", ["銃"])
-        self.assertIn("ガン", out)
-        self.assertEqual(out[0], "銃")
+        self.assertEqual(out[0], "銃ギミック")  # 同义词按产量优先序插最前
+        self.assertIn("銃", out)
         self.assertEqual(vision.apply_industry_synonyms("猫耳", ["ネコミミ"]),
                          ["ネコミミ"])  # 无命中原样返回
+
+    def test_reading_variant_single_kanji_skipped(self):
+        # 单字汉字不追加读音变体（銃→じゅう 会误匹配 かいじゅう 等品名）
+        out = vision.expand_reading_variants(["銃"])
+        self.assertEqual(out, ["銃"])
+        try:
+            import pykakasi  # noqa: F401
+        except ImportError:
+            self.skipTest("pykakasi not installed")
+        out = vision.expand_reading_variants(["信濃 3Dモデル"])  # 2 字汉字仍追加
+        self.assertIn("しなの 3Dモデル", out)
 
     def test_conservative_retry(self):
         titles = ["ベルト", "ピストルベルト", "Bell Hair",

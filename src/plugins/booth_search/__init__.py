@@ -446,7 +446,9 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
     返回 (merged_items, first_res)。单个关键词失败跳过。"""
     cfg = plugin_config
     sort, sort_note = _effective_sort(page)
-    limit = max(cfg.booth_limit, 10)
+    # 单词搜索深度 15：高热度泛词（スカート 等）popularity 头部的标题常不含词
+    # （Booth 搜索匹配描述），加深让标题命中的候选浮出，供裁剪与排序使用
+    limit = max(cfg.booth_limit, 15)
     terms, seen_t = [], set()
     for kw in kws[:6]:
         for tok in re.split(r"[\s/、，,]+", str(kw)):
