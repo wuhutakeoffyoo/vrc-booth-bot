@@ -56,6 +56,9 @@ class Config(BaseModel):
     # bot 侧限速：同一用户两次搜索的最小间隔（秒）与每分钟上限，防止刷指令触发风控
     user_cooldown: int = 10
     user_rate_limit: int = 5
+    # 全局并发上限：同时处理的查询数（跨用户共享）。每用户限速管不住不同用户
+    # 同时各来一发；满员直接告知稍后再试，保护 booth.pm 与 AI 配额
+    global_concurrency: int = 2
     # 查询结果缓存：相同查询（含页码/模式）在 TTL 内直接返回缓存结果（省 AI 额度）；
     # 容量上限超出自动清理最旧。0 = 关闭缓存
     query_cache_ttl: int = 1800

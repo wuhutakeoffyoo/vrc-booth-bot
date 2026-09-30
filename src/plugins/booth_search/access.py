@@ -54,3 +54,25 @@ def check_rate(cfg: Config, user_id, now=None) -> tuple[bool, int]:
     hits.append(now)
     _user_hits[uid] = hits
     return True, 0
+
+
+# 全局并发闸（纯逻辑，便于单测）：整个 bot 进程同时只放行 max_concurrent 个查询。
+# 每用户限速管不住「不同用户同时各来一发」，没有它 N 个用户并发就是 N 路打向
+# booth.pm 与 AI 配额；满员直接告知稍后再试，不排队（排队会放大延迟与占用）。
+class ConcurrencyGate:
+    def __init__(self, max_concurrent: int):
+        self.max_concurrent = max(1, int(max_concurrent))
+        self._used = 0
+
+    def try_acquire(self) -> bool:
+        if self._used >= self.max_concurrent:
+            return False
+        self._used += 1
+        return True
+
+    def release(self) -> None:
+        self._used = max(0, self._used - 1)
+
+    @property
+    def used(self) -> int:
+        return self._used

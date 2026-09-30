@@ -65,6 +65,9 @@ python bot.py             # 默认 0.0.0.0:8080，等 NapCat 反向 WS 接入
 | `IMGSEARCH_HEADLESS` | `true` | CLI 浏览器备援是否无头（服务器务必 true） |
 | `IMGSEARCH_TIMEOUT` | 240 | 图搜超时（秒） |
 | `SEARCH_TIMEOUT` | 60 | 搜索超时（秒） |
+| `USER_COOLDOWN` | 10 | 同一用户两次搜索最小间隔（秒） |
+| `USER_RATE_LIMIT` | 5 | 同一用户每分钟搜索次数上限 |
+| `GLOBAL_CONCURRENCY` | 2 | 全局并发上限：同时处理的查询数（跨用户共享，防多用户并发打爆 booth.pm/AI 配额，满员告知稍后再试） |
 
 **识图 AI 说明**：任何 OpenAI 兼容的多模态 chat 接口均可。样例预设 GLM
 （`https://open.bigmodel.cn/api/paas/v4` + `glm-5.3-flash`）。若换 DeepSeek：

@@ -102,6 +102,29 @@ class TestRateLimit(unittest.TestCase):
         self.assertTrue(access.check_rate(cfg, 200, now=3000.0)[0])  # 不同用户互不影响
 
 
+class TestConcurrencyGate(unittest.TestCase):
+    def test_limits_and_releases(self):
+        gate = access.ConcurrencyGate(2)
+        self.assertTrue(gate.try_acquire())
+        self.assertTrue(gate.try_acquire())
+        self.assertFalse(gate.try_acquire())  # 满员拒绝
+        self.assertEqual(gate.used, 2)
+        gate.release()
+        self.assertTrue(gate.try_acquire())   # 释放后可再进
+
+    def test_release_floor_at_zero(self):
+        gate = access.ConcurrencyGate(1)
+        gate.release()
+        gate.release()
+        self.assertEqual(gate.used, 0)
+        self.assertTrue(gate.try_acquire())
+
+    def test_min_size_is_one(self):
+        gate = access.ConcurrencyGate(0)  # 配置 0 视为 1
+        self.assertTrue(gate.try_acquire())
+        self.assertFalse(gate.try_acquire())
+
+
 class TestSplitPage(unittest.TestCase):
     """页码剥离（导入插件包需 nonebot 已 init，故放在本文件）。"""
 

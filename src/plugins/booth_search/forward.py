@@ -9,6 +9,7 @@ import base64
 import httpx
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
+from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 
 _HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://booth.pm/"}
 
@@ -115,7 +116,12 @@ async def build_result_nodes(self_id: int, header: str, notes: list,
 
 
 async def send(bot, event, nodes: list) -> bool:
-    """发送合并转发；群聊/私聊自动分派。失败返回 False（调用方回退纯文本）。"""
+    """发送合并转发；群聊/私聊自动分派。返回 False 时调用方回退纯文本。
+
+    超时/网络类异常按「可能已送达」处理返回 True：大体积转发（多节点 base64 图）
+    客户端超时后 NapCat 往往仍完成投递，此时回退纯文本会发出第二条重复消息——
+    宁缺勿重。只有 NapCat 明确拒绝（ActionFailed）或其它确定失败才回退文字版。
+    """
     try:
         gid = getattr(event, "group_id", None)
         if gid is not None:
@@ -125,6 +131,16 @@ async def send(bot, event, nodes: list) -> bool:
             await bot.call_api("send_private_forward_msg",
                                user_id=event.user_id, messages=nodes)
         return True
+    except NetworkError as e:
+        logger.warning(f"合并转发网络异常（可能已送达，不回退纯文本防重复）: {e}")
+        return True
+    except ActionFailed as e:
+        logger.warning(f"合并转发被拒绝（ActionFailed），回退纯文本: {e}")
+        return False
     except Exception as e:
+        lowered = f"{type(e).__name__} {e}".lower()
+        if "timeout" in lowered or "timed out" in lowered:
+            logger.warning(f"合并转发超时（可能已送达，不回退纯文本防重复）: {e}")
+            return True
         logger.warning(f"合并转发发送失败，回退纯文本: {e}")
         return False

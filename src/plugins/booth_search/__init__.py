@@ -24,6 +24,8 @@ from .config import Config
 from .format import format_results
 
 plugin_config = get_plugin_config(Config)
+# 全局并发闸：同时处理的查询上限（跨用户共享，GLOBAL_CONCURRENCY 可配）
+_global_gate = access.ConcurrencyGate(plugin_config.global_concurrency)
 
 
 class BoothUnavailable(RuntimeError):
@@ -623,12 +625,14 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
 
 
 async def _send_result(bot, event, result: dict, from_cache: bool = False):
-    """优先合并转发（含商品图），失败或无条目时回退纯文本。"""
+    """优先合并转发（含商品图），失败或无条目时回退纯文本（注明降级原因）。
+    超时类失败由 forward.send 按「可能已送达」处理，不会走到这里造成重复。"""
     cfg = plugin_config
     entries = result.get("entries") or []
     header = result.get("header") or ""
     if from_cache and header:
         header = header + "\n（缓存结果，可能非最新）"
+    text = result["text"]
     if cfg.forward_messages and entries:
         try:
             nodes = await forward.build_result_nodes(
@@ -637,9 +641,10 @@ async def _send_result(bot, event, result: dict, from_cache: bool = False):
         except Exception as e:
             logger.warning(f"转发节点构建失败: {e}")
             nodes = None
-        if nodes and await forward.send(bot, event, nodes):
-            return
-    text = result["text"]
+        if nodes:
+            if await forward.send(bot, event, nodes):
+                return
+            text = "⚠ 合并转发发送失败，改用文字版：\n" + text
     if from_cache and result.get("header"):
         text = "(缓存结果，可能非最新)\n" + text
     await matcher.finish(text)
@@ -652,6 +657,16 @@ async def handle_vrc_search(bot, event: MessageEvent):
         await matcher.finish(f"查询太频繁：请 {wait} 秒后再试"
                              f"（限流：每人 {plugin_config.user_cooldown} 秒间隔、"
                              f"每分钟 {plugin_config.user_rate_limit} 次）")
+    if not _global_gate.try_acquire():
+        await matcher.finish(f"当前已有 {plugin_config.global_concurrency} 个查询在处理，"
+                             "通道满员，请稍后再试")
+    try:
+        await _do_search(bot, event)
+    finally:
+        _global_gate.release()
+
+
+async def _do_search(bot, event: MessageEvent):
     m = SEARCH_RE.match(_plain(event))
     hint = (m.group(1) or "").strip() if m else ""
     hint, page = _split_page(hint)
@@ -700,6 +715,16 @@ async def handle_vrc_r18(bot, event: MessageEvent):
                                  f"每分钟 {plugin_config.user_rate_limit} 次）")
     if not access.sensitive_allowed(plugin_config, getattr(event, "user_id", "")):
         await r18_matcher.finish(DENY_MSG)
+    if not _global_gate.try_acquire():
+        await r18_matcher.finish(f"当前已有 {plugin_config.global_concurrency} 个查询在处理，"
+                                 "通道满员，请稍后再试")
+    try:
+        await _do_r18(bot, event)
+    finally:
+        _global_gate.release()
+
+
+async def _do_r18(bot, event: MessageEvent):
     m = R18_RE.match(_plain(event))
     hint = (m.group(1) or "").strip() if m else ""
     hint, page = _split_page(hint)
