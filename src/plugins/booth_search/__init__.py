@@ -508,6 +508,14 @@ async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
     header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
               if res.get("total") else f"前 {shown}:{page_note}{sn}")
     header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
+    if not desc_kws and len(merged) > cfg.booth_limit:
+        # 标题命中足够时丢弃不相关填充：多词合并会把其他词的 popularity 结果
+        # 混进来，没有本裁剪时「铃铛」会带回鸟居/泳装这类完全无关的商品
+        low = [k.lower() for k in kws if k]
+        matched = [it for it in merged
+                   if any(k in (it.get("name") or "").lower() for k in low)]
+        if len(matched) >= cfg.booth_limit:
+            merged = matched
     if desc_kws:
         await _enrich_entries(merged[:15], desc_len=2000)
         merged = rank.desc_boost(merged, kws, desc_kws)
@@ -562,7 +570,9 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1) -> di
         # 翻译与回忆相互独立，并行发起（省一轮 AI 等待）
         (kws0, desc_kws, ai_note), rk_raw = await asyncio.gather(_translate_task(), _recall_task())
         rk = [k for k in rk_raw if k.lower() not in {x.lower() for x in kws0}][:2]
-        kws = vision.expand_reading_variants(rk + kws0)
+        # 翻译词在前、回忆词殿后：回忆给的是「具体商品名」，对铃铛/猫耳这类日常
+        # 泛称多半是半编造的，拿去当搜索词只会带回 popularity 垃圾
+        kws = vision.expand_reading_variants(kws0 + rk)
         if kws:
             merged, res = await _search_merged(kws, adult, page)
             if merged:
