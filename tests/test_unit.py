@@ -31,7 +31,7 @@ class TestBoothClient(unittest.TestCase):
                 raise subprocess.TimeoutExpired(cmd="x", timeout=1)
             if cmd and "--version" in cmd:
                 return subprocess.CompletedProcess(args=[], returncode=0,
-                                                   stdout="booth 1.2.0", stderr="")
+                                                   stdout="booth 1.4.0", stderr="")
             return subprocess.CompletedProcess(args=[], returncode=returncode,
                                                stdout=stdout, stderr=stderr)
         return run

@@ -2,6 +2,7 @@ import sys
 import tempfile
 from pathlib import Path
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "plugins"))
 
@@ -15,6 +16,8 @@ class TestQCache(unittest.TestCase):
         qcache.DB_PATH = Path(self._tmp.name) / "qc.sqlite3"
 
     def tearDown(self):
+        if qcache._conn:
+            qcache._conn.close()
         qcache._conn = None
         self._tmp.cleanup()
 
@@ -38,11 +41,31 @@ class TestQCache(unittest.TestCase):
     def test_expired_rows_purged_on_put(self):
         qcache.put("old", {"a": 1}, ttl=600)
         # 直接把 ts 改老
-        qcache._db().execute("UPDATE qcache SET ts = 1 WHERE key = 'old'")
+        qcache._db().execute("UPDATE qcache SET ts = 1, expires = 1 WHERE key = 'old'")
         qcache._db().commit()
         qcache.put("new", {"b": 2}, ttl=600)
         self.assertIsNone(qcache.get("old", 600))    # 过期行被清理
 
+
+    def test_plan_short_ttl_does_not_purge_longer_result_ttl(self):
+        with mock.patch.object(qcache.time, "time", return_value=1000):
+            qcache.put("result", {"kind": "result"}, ttl=600)
+        with mock.patch.object(qcache.time, "time", return_value=1020):
+            qcache.put("plan", {"kind": "plan"}, ttl=10)
+            self.assertIsNotNone(qcache.get("result", 600))
+        with mock.patch.object(qcache.time, "time", return_value=1040):
+            qcache.put("other", {}, ttl=10)
+            self.assertIsNone(qcache.get("plan", 10))
+            self.assertIsNotNone(qcache.get("result", 600))
+
+    def test_legacy_cache_schema_migrates_in_place(self):
+        import sqlite3
+        conn = sqlite3.connect(qcache.DB_PATH)
+        conn.execute("CREATE TABLE qcache (key TEXT PRIMARY KEY, ts REAL, payload TEXT)")
+        conn.commit()
+        conn.close()
+        qcache.put("new", {"new": True}, ttl=600)
+        self.assertEqual(qcache.get("new", 600), {"new": True})
 
     def test_version_salt_invalidates_old_entries(self):
         key = qcache.make_key("vx")

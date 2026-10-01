@@ -76,7 +76,7 @@ class TestConfigAndPolicy(unittest.TestCase):
 class TestBotFlows(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cfg = Config(ai_mode="api", vision_api_key="", fallback_api_key="",
-                          recall_enabled=False, websearch_fallback=False)
+                          recall_enabled=False, websearch_fallback=False, plan_cache_ttl=0)
         patches = [
             mock.patch.object(bs, "plugin_config", self.cfg),
             mock.patch.object(vision, "resolve_cli_bin", side_effect=RuntimeError("no CLI")),

@@ -3,8 +3,13 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import sys
 from pathlib import Path
+try:
+    from . import execution
+except ImportError:
+    import execution
 
 
 class BoothCliError(Exception):
@@ -16,7 +21,7 @@ _cli_verified: str | None = None
 
 
 def _verify_cli_supports_bot(cmd_prefix: list) -> None:
-    """校验 CLI 是 1.2.0+（带 bot 钩子）。旧版 booth 是最常见的部署坑。"""
+    """校验 CLI 是 1.4.0+，支持共享请求预算。"""
     global _cli_verified
     exe_key = " ".join(cmd_prefix)
     if _cli_verified == exe_key:
@@ -27,11 +32,13 @@ def _verify_cli_supports_bot(cmd_prefix: list) -> None:
                               timeout=15)
         out = (proc.stdout or "").strip()
         version = out.split()[-1] if out and proc.returncode == 0 else ""
-        if not version or [int(x) for x in version.split(".")] < [1, 2, 0]:
+        if not version or [int(x) for x in version.split(".")] < [1, 4, 0]:
             raise BoothCliError(
-                f"booth CLI 版本过旧（{out or '无输出'}），bot 钩子需要 >=1.2.0。"
+                f"booth CLI 版本过旧（{out or '无输出'}），共享请求预算需要 >=1.4.0。"
                 "请更新 booth-cli 或在 BOOTH_CLI_PATH 指向新版 booth.py")
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except subprocess.TimeoutExpired as e:
+        raise BoothCliError("booth CLI 版本校验超时") from e
+    except (OSError, ValueError) as e:
         raise BoothCliError(f"booth CLI 不可执行（{exe_key}）: {e}")
     _cli_verified = exe_key
 
@@ -59,7 +66,12 @@ def call_booth(action: str, params: dict | None = None,
     exe = resolve_cli_path(cli_path)
     cmd = build_cmd(exe)
     _verify_cli_supports_bot(cmd)
-    req = json.dumps({"action": action, "params": params or {}}, ensure_ascii=False)
+    payload = {"action": action, "params": params or {}}
+    context = execution.request_context()
+    if context:
+        payload["context"] = context
+        timeout = min(timeout, max(1, context["deadline"] - time.time()))
+    req = json.dumps(payload, ensure_ascii=False)
     try:
         proc = subprocess.run(
             cmd + ["bot", req],
@@ -77,19 +89,27 @@ def call_booth(action: str, params: dict | None = None,
         envelope = json.loads(last)
     except json.JSONDecodeError:
         raise BoothCliError(f"booth 输出不是合法 JSON: {proc.stdout[:200]}")
+    execution.observe_wire(envelope.get("request_budget"))
     if not envelope.get("ok"):
         raise BoothCliError(envelope.get("error") or "booth 返回未知错误")
     return envelope.get("data") or {}
 
 
 def search(query: str | list, *, limit: int = 5, sort: str = "popularity",
-           adult: str = "include", page: int = 1, tag: str | None = None,
+           adult: str = "include", page: int = 1, tag: str | list | None = None,
+           category: str | None = None, or_word: list | None = None, exclude: list | None = None,
            cli_path: str = "", timeout: int = 60) -> dict:
     params = {"query": query, "limit": limit, "sort": sort, "adult": adult, "no_vrc": True}
     if page > 1:
         params["page"] = page
     if tag:
         params["tag"] = tag
+    if category:
+        params["category"] = category
+    if or_word:
+        params["or_word"] = or_word
+    if exclude:
+        params["exclude"] = exclude
     return call_booth("search", params, cli_path=cli_path, timeout=timeout)
 
 

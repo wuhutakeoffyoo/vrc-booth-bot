@@ -1,6 +1,7 @@
 """与真实 booth-cli 的离线契约检查（BOOTH_CLI_TEST_PATH 必须显式指定）。"""
 import importlib
 import os
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -11,7 +12,7 @@ import nonebot
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "plugins"))
 nonebot.init(log_level="ERROR")
-from booth_search import booth_client as bc
+from booth_search import booth_client as bc, execution
 
 CLI = Path(os.environ["BOOTH_CLI_TEST_PATH"]).resolve()
 sys.path.insert(0, str(CLI.parent))
@@ -22,7 +23,9 @@ class TestParentContract(unittest.TestCase):
     def test_real_subprocess_version_envelope(self):
         data = bc.call_booth("version", cli_path=str(CLI))
         self.assertEqual(data["version"], parent.__version__)
-        self.assertGreaterEqual(tuple(map(int, data["version"].split("."))), (1, 3, 3))
+        self.assertGreaterEqual(tuple(map(int, data["version"].split("."))), (1, 4, 0))
+        self.assertIn("shared_request_budget", data["capabilities"])
+        self.assertEqual(len(data["semantic_fingerprint"]), 64)
 
     def test_bot_search_flags_reach_parent_parser(self):
         for tag, adult in ((None, "exclude"), ("VRChat", "only")):
@@ -36,6 +39,23 @@ class TestParentContract(unittest.TestCase):
                 self.assertEqual(args.adult, adult)
                 self.assertFalse(args.vrc)
                 self.assertEqual("tags%5B%5D=VRChat" in url, tag == "VRChat")
+
+    def test_real_subprocess_query_context_and_cached_wire_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shim = Path(directory) / "cached_cli.py"
+            shim.write_text("import sys\nsys.path.insert(0, " + repr(str(CLI.parent)) + ")\n"
+                            "import booth\nbooth.cache_get=lambda url,ttl:(b'{\\\"id\\\":1,\\\"name\\\":\\\"cached\\\"}',url)\n"
+                            "booth.main()\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"BOOTH_REQUEST_BUDGET_DB": str(Path(directory) / "budget.db")}), \
+                    execution.query_scope() as context:
+                data = bc.item(1, cli_path=str(shim))
+                self.assertEqual(data["name"], "cached")
+                self.assertEqual(context["wire_count"], 0)
+            self.assertFalse((Path(directory) / "budget.db").exists())
+
+    def test_source_evidence_contract_matches_parent(self):
+        self.assertEqual((CLI.parent / "search_evidence.py").read_text(encoding="utf-8"),
+                         (ROOT / "src/plugins/booth_search/search_evidence.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
