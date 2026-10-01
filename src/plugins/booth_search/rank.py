@@ -5,12 +5,26 @@ desc_hit/desc_boost 服务于『适用于XX素体』类需求：Booth 把対応�
 把核实命中的候选置顶。
 """
 from typing import Any
+import re
 
 
 def desc_hit(it: dict, desc_kws: list) -> bool:
-    """商品标题或简介（商品说明）含任一核实词（大小写不敏感子串）。"""
-    hay = ((it.get("name") or "") + "\n" + (it.get("_desc") or "")).lower()
-    return any(str(k).lower() in hay for k in desc_kws if k)
+    """关键词相关度，不冒充兼容性确认。"""
+    return description_status(it, desc_kws) in ("mentioned", "title_only")
+
+
+def description_status(it: dict, desc_kws: list) -> str:
+    terms = [str(k).casefold() for k in desc_kws if k]
+    desc = (it.get("_desc") or "").casefold()
+    matching = [s for s in re.split(r"[。！？\n]", desc) if any(k in s for k in terms)]
+    negative = r"対応していません|非対応|未対応|not\s+(?:compatible|supported)|不(?:兼容|支持)"
+    if any(re.search(negative, s) for s in matching):
+        return "unsupported"
+    if matching and it.get("detail_status") != "unavailable":
+        return "mentioned"
+    if any(k in (it.get("name") or "").casefold() for k in terms):
+        return "title_only"
+    return "unknown"
 
 
 def desc_boost(merged: list, title_kws: list, desc_kws: list) -> list:

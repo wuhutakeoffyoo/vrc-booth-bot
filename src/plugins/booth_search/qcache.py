@@ -4,6 +4,7 @@ sqlite 存储（~/.vrc-booth-bot/query_cache.sqlite3），按 key 缓存完整�
 （JSON 序列化）。TTL 与容量上限可配；写入时自动清理过期与超额最旧条目。
 """
 import json
+import hashlib
 import sqlite3
 import time
 from pathlib import Path
@@ -32,12 +33,25 @@ def _db():
 # 结果语义版本：前缀进缓存 key。凡影响结果内容的代码变更（策略/格式/修复）部署时
 # 必须递增，让旧缓存整体失效——否则新代码上线后 TTL 内用户拿到的仍是修复前
 # 的旧结果（2026-09-30「铃铛」事故：修复已上线，用户却命中旧缓存以为没优化）
-CACHE_VERSION = "7"
+CACHE_VERSION = "8"
 
 
 def make_key(*parts) -> str:
     """缓存 key：版本前缀 + 各部分小写化拼接（顺序稳定）。"""
     return CACHE_VERSION + "|" + "|".join(str(p).strip().lower() for p in parts if p is not None)
+
+
+def configuration_key(cfg) -> str:
+    """只摘要影响结果的非敏感配置，不写入 key 或认证信息。"""
+    names = ("booth_limit", "booth_sort", "vrc_tag", "r18_mode", "ai_mode",
+             "vision_model", "fallback_model", "ai_cli_model", "recall_enabled",
+             "websearch_fallback", "booth_cli_path", "vision_base_url",
+             "fallback_base_url", "ai_cli_bin")
+    data = {name: getattr(cfg, name) for name in names}
+    data["primary_available"] = bool(cfg.vision_api_key)
+    data["fallback_available"] = bool(cfg.fallback_api_key)
+    data["exa_available"] = bool(cfg.exa_api_key)
+    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def get(key: str, ttl: int):

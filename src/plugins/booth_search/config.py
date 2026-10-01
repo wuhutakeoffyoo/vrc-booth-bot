@@ -1,8 +1,9 @@
 """插件配置（pydantic 模型，值从 .env / 环境变量读取，仓库内不存任何凭据）。"""
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class Config(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
     # booth CLI 位置：空则从 PATH 找 booth，也可指向 booth.py 绝对路径
     booth_cli_path: str = ""
 
@@ -15,6 +16,10 @@ class Config(BaseModel):
     # 图搜
     imgsearch_headless: bool = True    # 服务器环境务必 true
     imgsearch_timeout: int = 240
+    image_allowed_hosts: list[str] = [
+        "multimedia.nt.qq.com.cn", "gchat.qpic.cn", "c2cpicdw.qpic.cn",
+        "booth.pximg.net", "booth.pm",
+    ]
 
     # AI 后端：cli=本机 opencode CLI（Go 套餐 free 模型可用）| api=OpenAI 兼容 HTTP
     ai_mode: str = "cli"
@@ -31,9 +36,12 @@ class Config(BaseModel):
     vision_timeout: int = 60
     # 兜底 api（主 api 失败/额度耗尽时自动切换，OpenAI 兼容格式）
     # GLM Coding Plan: https://open.bigmodel.cn/api/coding/paas/v4
-    fallback_api_key: str = ""
-    fallback_base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4"
-    fallback_model: str = "glm-5.3-flash"
+    fallback_api_key: str = Field(default="", validation_alias=AliasChoices(
+        "ai_fallback_api_key", "fallback_api_key"))
+    fallback_base_url: str = Field(default="https://open.bigmodel.cn/api/coding/paas/v4",
+        validation_alias=AliasChoices("ai_fallback_base_url", "fallback_base_url"))
+    fallback_model: str = Field(default="glm-5.3-flash", validation_alias=AliasChoices(
+        "ai_fallback_model", "fallback_model"))
     # 自我纠错：利用模型 VRChat 圈知识回忆知名商品名（中文查询时追加搜索）
     recall_enabled: bool = True
     # 网络检索兜底：站内搜索无果时从 DDG/Exa 找 booth.pm 商品链接（Exa 需 key）

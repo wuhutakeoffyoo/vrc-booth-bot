@@ -268,7 +268,7 @@ async def _api_post(url: str, payload: dict, api_key: str,
                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                               "AppleWebKit/537.36 (KHTML, like Gecko) "
                               "Chrome/126.0.0.0 Safari/537.36")}
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         for attempt in range(retries + 1):
             try:
                 resp = await client.post(url, json=payload, headers=headers)
@@ -428,6 +428,36 @@ def parse_plan(content: str) -> tuple[list, list, bool]:
     return clean[:8], [], True
 
 
+def validate_evaluation(data: dict, titles: list | None = None) -> dict:
+    """至少三件不同候选；引用必须属于本轮候选。"""
+    valid = []
+    hits = data.get("hits") or []
+    for raw in hits if isinstance(hits, list) else []:
+        hit = str(raw).strip()
+        if not hit:
+            continue
+        if titles is not None:
+            m = re.match(r"^#?(\d+)(?:$|[.、:\s])", hit)
+            if m:
+                idx = int(m.group(1))
+                if not 1 <= idx <= len(titles):
+                    continue
+            else:
+                matches = [i for i, title in enumerate(titles, 1)
+                           if hit in re.sub(r"^\d+\.\s*", "", title)]
+                if len(matches) != 1:
+                    continue
+                idx = matches[0]
+            hit = str(idx)
+        if hit not in valid:
+            valid.append(hit)
+    result = dict(data, hits=valid[:6])
+    if result.get("verdict") == "ok" and len(valid) < 3:
+        result.update(verdict="retry", reason="有效命中证据不足三条，未能确认")
+    return result
+
+
+
 def parse_evaluation(content: str) -> dict:
     """解析评估输出：{verdict, reason, hits, keywords}；解析失败抛 RuntimeError
     （调用方按「不可评估，用第一轮结果」降级）。"""
@@ -446,8 +476,8 @@ def parse_evaluation(content: str) -> dict:
                            if str(h).strip()]
                           if isinstance(hits, list) else [])
             if verdict in ("ok", "retry"):
-                return {"verdict": verdict, "reason": reason,
-                        "hits": clean_hits[:6], "keywords": clean[:6]}
+                return validate_evaluation({"verdict": verdict, "reason": reason,
+                                            "hits": clean_hits[:6], "keywords": clean[:6]})
         except (json.JSONDecodeError, AttributeError):
             pass
     raise RuntimeError(f"评估输出无法解析: {(content or '')[-160:]}")
@@ -496,7 +526,7 @@ async def evaluate_results(query: str, keywords: list, titles: list, *,
         "max_tokens": 2000,
     }
     content = await _api_post(url, payload, api_key, session_id, timeout)
-    return parse_evaluation(content)
+    return validate_evaluation(parse_evaluation(content), titles)
 
 
 # ---------------------------------------------------------------- 旧链路（归档未启用）
@@ -602,6 +632,30 @@ def _cli_run_sync(bin_path: str, args: list, timeout: int) -> str:
         tail = ((proc.stdout or "") + (proc.stderr or "")).strip()[-200:]
         raise RuntimeError(f"opencode run 失败(exit {proc.returncode}): {tail}")
     return _strip_ansi(proc.stdout)
+
+
+async def plan_search_cli(text: str, *, bin_path: str, model: str,
+                          timeout: int = 90, feedback: str = "") -> tuple:
+    prompt = f"{_PLAN_PROMPT}\n用户搜索请求：{text}"
+    if feedback:
+        prompt += f"\n上一轮搜索经验：{feedback}"
+    for attempt in range(2):
+        out = await asyncio.to_thread(
+            _cli_run_sync, bin_path, ["-m", model, prompt +
+                ("\n只输出 JSON 本体。" if attempt else "")], timeout)
+        kws, dkws, translated = parse_plan(out)
+        if kws and re.search(r"\{.*\}", out, re.S):
+            return kws, dkws, translated
+    raise RuntimeError("CLI 搜索方案输出无法解析")
+
+
+async def evaluate_results_cli(query: str, keywords: list, titles: list, *,
+                               bin_path: str, model: str, timeout: int = 90) -> dict:
+    prompt = (_EVAL_PROMPT.replace("{query}", query)
+              .replace("{keywords}", " / ".join(keywords))
+              .replace("{titles}", "\n".join(titles)))
+    out = await asyncio.to_thread(_cli_run_sync, bin_path, ["-m", model, prompt], timeout)
+    return validate_evaluation(parse_evaluation(out), titles)
 
 
 async def translate_keywords_cli(text: str, *, bin_path: str, model: str,
