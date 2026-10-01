@@ -1,5 +1,6 @@
 """插件配置（pydantic 模型，值从 .env / 环境变量读取，仓库内不存任何凭据）。"""
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from typing import Literal
 
 
 class Config(BaseModel):
@@ -12,6 +13,13 @@ class Config(BaseModel):
     booth_sort: str = "popularity"
     r18_mode: str = "include"          # include / exclude / only
     search_timeout: int = 60
+    query_timeout: int = Field(default=180, ge=30, le=600)
+    request_budget: int = Field(default=12, ge=6, le=100)
+    retry_request_budget: int = Field(default=18, ge=6, le=100)
+    search_candidate_limit: int = Field(default=60, ge=15, le=100)
+    plan_cache_ttl: int = Field(default=1800, ge=0)
+    run_profile: Literal["production", "benchmark"] = "production"
+    benchmark_allow_ai: bool = False  # explicit opt-in; use independently provisioned quota
 
     # 图搜
     imgsearch_headless: bool = True    # 服务器环境务必 true

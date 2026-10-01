@@ -1,5 +1,9 @@
 """结果格式化（纯函数，可单测）。"""
 from typing import Any
+try:
+    from .search_evidence import evidence_label
+except ImportError:
+    from search_evidence import evidence_label
 
 
 def price_str(price: Any) -> str:
@@ -36,6 +40,8 @@ def format_results(entries: list, max_n: int = 6, title: str = "") -> str:
         if tags:
             lines.append("   " + " ".join("#" + str(t) for t in tags))
         lines.append(f"   {url}")
+        if evidence_label(it):
+            lines.append("   " + evidence_label(it))
         shop = (it.get("shop") or {}).get("name")
         if shop:
             cat = f" · {it['category']}" if it.get("category") else ""

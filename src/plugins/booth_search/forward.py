@@ -80,6 +80,7 @@ async def build_result_nodes(self_id: int, header: str, notes: list,
     nodes = [_node(self_id, nickname, head_segs)]
 
     from .format import price_str
+    from .search_evidence import evidence_label
     for i, (it, img) in enumerate(zip(top, imgs), 1):
         flags = []
         if it.get("via"):
@@ -109,6 +110,8 @@ async def build_result_nodes(self_id: int, header: str, notes: list,
             lines.append(" ".join("#" + str(t) for t in tags))
         url = it.get("url") or f"https://booth.pm/ja/items/{it.get('id')}"
         lines.append(url)
+        if evidence_label(it):
+            lines.append(evidence_label(it))
         segs = ([img] if img is not None else []) + [MessageSegment.text("\n".join(lines))]
         nodes.append(_node(self_id, nickname, segs))
     return nodes

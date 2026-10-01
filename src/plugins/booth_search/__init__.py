@@ -19,7 +19,7 @@ from nonebot import get_plugin_config, logger, on_message
 from nonebot.adapters.onebot.v11 import MessageEvent
 from nonebot.rule import Rule
 
-from . import access, booth_client, forward, qcache, rank, vision, webfind
+from . import access, booth_client, execution, forward, qcache, rank, search_evidence, vision, webfind
 from .config import Config
 from .image_download import ImageDownloadError, download_image
 from .result_policy import filter_entries
@@ -28,6 +28,8 @@ from .format import format_results
 plugin_config = get_plugin_config(Config)
 # 全局并发闸：同时处理的查询上限（跨用户共享，GLOBAL_CONCURRENCY 可配）
 _global_gate = access.ConcurrencyGate(plugin_config.global_concurrency)
+_plan_flights = execution.SingleFlight()
+_result_flights = execution.SingleFlight()
 
 
 class BoothUnavailable(RuntimeError):
@@ -115,6 +117,8 @@ def _ai_backend() -> tuple[str, str]:
     """返回 (mode, resolved_param)。cli 模式返回 opencode 可执行文件路径；
     api 模式返回第二个元素无意义。AI 整体不可用时返回 ("", "")。"""
     cfg = plugin_config
+    if cfg.run_profile == "benchmark" and not cfg.benchmark_allow_ai:
+        return "", ""
     if cfg.ai_mode == "cli":
         try:
             return "cli", vision.resolve_cli_bin(cfg.ai_cli_bin)
@@ -167,6 +171,8 @@ async def _ai_translate(text: str) -> tuple[list, list]:
 async def _ai_recall(desc: str) -> list:
     """知名商品回忆：利用模型 VRChat 圈知识产出具体商品名（api 双路，不回落 cli）。"""
     cfg = plugin_config
+    if cfg.run_profile == "benchmark" and not cfg.benchmark_allow_ai:
+        raise BoothUnavailable("benchmark profile 未显式允许 AI")
     try:
         if not cfg.vision_api_key:
             raise BoothUnavailable("主 API 未配置")
@@ -189,6 +195,8 @@ async def _ai_recall(desc: str) -> list:
 async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
     cfg = plugin_config
     mode, param = _ai_backend()
+    if not mode:
+        raise BoothUnavailable("AI 未配置或 benchmark profile 未显式允许 AI")
     if mode == "api":
         try:
             if not cfg.vision_api_key:
@@ -242,6 +250,8 @@ async def _enrich_entries(entries: list, desc_len: int = 600) -> None:
     sem = asyncio.Semaphore(3)
 
     async def one(it: dict):
+        if it.get("detail_status") in ("available", "unavailable"):
+            return
         async with sem:
             try:
                 detail = await asyncio.to_thread(
@@ -250,7 +260,7 @@ async def _enrich_entries(entries: list, desc_len: int = 600) -> None:
             except Exception:
                 it["detail_status"] = "unavailable"
                 return
-            for k in ("wish_lists_count", "tags", "published_at", "is_adult", "is_vrchat"):
+            for k in ("wish_lists_count", "tags", "published_at", "is_adult", "is_vrchat", "category"):
                 v = detail.get(k)
                 if v is not None:
                     it[k] = v
@@ -298,7 +308,6 @@ async def _handle_image(image_url: str, hint: str) -> dict:
 async def _handle_image_bytes(image_bytes: bytes, hint: str) -> dict:
     """内部盲测入口：直接注入样本字节，不暴露消息 URL 本地读文件通道。"""
     cfg = plugin_config
-
     # 1) 识图 AI 提词（AI 不可用则跳过，仅靠 CLI 自带派生词）
     keywords, item_type = [], ""
     ai_note = ""
@@ -452,9 +461,8 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
     返回 (merged_items, first_res)。单个关键词失败跳过。"""
     cfg = plugin_config
     sort, sort_note = _effective_sort(page)
-    # 单词搜索深度 15：高热度泛词（スカート 等）popularity 头部的标题常不含词
-    # （Booth 搜索匹配描述），加深让标题命中的候选浮出，供裁剪与排序使用
-    limit = max(cfg.booth_limit, 15)
+    # Retain candidates already present on this page, without more page requests.
+    limit = max(cfg.booth_limit, cfg.search_candidate_limit)
     terms, seen_t = [], set()
     for kw in kws[:6]:
         for tok in re.split(r"[\s/、，,]+", str(kw)):
@@ -520,7 +528,7 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
 async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
                             desc_kws: list, page: int, page_note: str,
                             ai_note: str = "",
-                            extra_notes: list | None = None) -> dict:
+                            extra_notes: list | None = None, enrich: bool = True) -> dict:
     """AI 关键词搜索的统一出口：可选描述核实重排 → 补详情 → 组装返回。
 
     desc_kws 非空时（『适用于XX素体』类需求）拉大详情池、简介扩长，
@@ -534,28 +542,23 @@ async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
     sn = res.get("sort_note") or ""
     header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
               if res.get("total") else f"前 {shown}:{page_note}{sn}")
-    header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
+    header = f"{header}\n检索词: {' / '.join(kws[:3])}（原词「{hint}」）"
     if res.get("_search_failures"):
         header += "\n部分关键词请求失败，展示已取得的结果"
     for note in extra_notes:
         header += f"\n{note}"
-    if not desc_kws and len(merged) > cfg.booth_limit:
-        # 标题命中足够时丢弃不相关填充：多词合并会把其他词的 popularity 结果
-        # 混进来，没有本裁剪时「铃铛」会带回鸟居/泳装这类完全无关的商品
-        low = [k.lower() for k in kws if k]
-        matched = [it for it in merged
-                   if any(k in (it.get("name") or "").lower() for k in low)]
-        if len(matched) >= cfg.booth_limit:
-            merged = matched
     if desc_kws:
-        await _enrich_entries(merged[:15], desc_len=2000)
+        if enrich:
+            await _enrich_entries(merged[:min(cfg.booth_limit, 6)], desc_len=-1)
         merged = rank.desc_boost(merged, kws, desc_kws)
         n_hit = sum(1 for it in merged if rank.description_status(it, desc_kws) == "mentioned")
         header += (f"\n商品说明中提及「{' / '.join(desc_kws[:2])}」:{n_hit} 件（未确认兼容性）"
                    if n_hit else
                    "\n商品说明未提供可确认的兼容性证据，按关键词相关度展示")
     else:
-        await _enrich_entries(merged[:cfg.booth_limit])
+        if enrich:
+            await _enrich_entries(merged[:min(cfg.booth_limit, 6)], desc_len=-1)
+    merged = search_evidence.promote_evidence(merged)
     return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
             "entries": merged, "header": header,
             "notes": ([ai_note] if ai_note else []) + extra_notes,
@@ -568,6 +571,8 @@ async def _ai_plan(text: str, feedback: str = "") -> tuple[list, list, bool]:
     feedback：保守重试场景告知第一轮教训。返回 (标题关键词, desc_keywords, 是否翻译)。"""
     cfg = plugin_config
     mode, param = _ai_backend()
+    if not mode:
+        raise BoothUnavailable("AI 未配置或 benchmark profile 未显式允许 AI")
     if mode == "cli":
         try:
             return await vision.plan_search_cli(
@@ -605,6 +610,8 @@ async def _ai_evaluate(query: str, keywords: list, titles: list) -> dict:
     """结果评估（主 api → 兜底 api）。都不可用抛 BoothUnavailable。"""
     cfg = plugin_config
     mode, param = _ai_backend()
+    if not mode:
+        raise BoothUnavailable("AI 未配置或 benchmark profile 未显式允许 AI")
     if mode == "cli":
         try:
             return await vision.evaluate_results_cli(
@@ -638,6 +645,22 @@ async def _ai_evaluate(query: str, keywords: list, titles: list) -> dict:
     raise BoothUnavailable("结果评估不可用（主/兜底 api/cli）")
 
 
+async def _cached_plan(hint: str, adult: str | None = None):
+    cfg = plugin_config
+    key = qcache.make_key("plan", hint, adult or cfg.r18_mode, qcache.configuration_key(cfg))
+    cached = qcache.get(key, cfg.plan_cache_ttl) if cfg.plan_cache_ttl > 0 else None
+    if isinstance(cached, dict) and isinstance(cached.get("keywords"), list) and cached["keywords"]:
+        return cached["keywords"], cached.get("desc_keywords") or [], bool(cached.get("translated"))
+
+    async def produce(_notify):
+        plan = await execution.stage("plan", lambda: _ai_plan(hint))
+        if cfg.plan_cache_ttl > 0 and plan[0]:
+            qcache.put(key, {"keywords": plan[0], "desc_keywords": plan[1], "translated": plan[2]},
+                       ttl=cfg.plan_cache_ttl, max_entries=cfg.query_cache_max)
+        return plan
+    return await _plan_flights.run(key, produce, timeout=cfg.query_timeout)
+
+
 async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
                        notify=None) -> dict:
     """文本搜索入口（智能体化链路）：
@@ -648,6 +671,12 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
     notify: 可选异步回调（QQ 侧传 matcher.send），用于过程通知。
     返回 {"text", "entries", "header", "notes"}。"""
     cfg = plugin_config
+    if execution.request_context() is None:
+        with execution.query_scope(cfg.request_budget, cfg.query_timeout) as context:
+            result = await asyncio.wait_for(_handle_text(hint, adult, page, notify),
+                                            timeout=cfg.query_timeout)
+            result["metrics"] = {"wire_requests": context["wire_count"], "stages": context["stages"]}
+            return result
     page_note = f"（第 {page} 页）" if page > 1 else ""
     ai_mode, _ = _ai_backend()
     ai_ready = bool(ai_mode)
@@ -666,7 +695,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
     desc_kws: list = []
     if ai_ready:
         try:
-            kws, desc_kws, translated = await _ai_plan(hint)
+            kws, desc_kws, translated = await _cached_plan(hint, adult)
             logger.info(f"搜索方案: {kws} (translated={translated}, desc={desc_kws})")
         except Exception as e:
             logger.warning(f"AI 方案规划失败（用原词检索）: {e}")
@@ -676,30 +705,26 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
         kws = vision.apply_industry_synonyms(hint, kws)
         kws = vision.expand_reading_variants(kws)
 
-    merged, res = await _search_merged(kws or [hint], adult, page)
+    merged, res = await execution.stage("search", lambda: _search_merged(kws or [hint], adult, page))
     if not merged and kws:
         # 方案词无果，退回原词直搜（日文输入时方案词可能反而偏）
         merged, res2 = await _search_merged([hint], adult, page)
         if res2.get("_search_successes") or (res2.get("total") and not res.get("total")):
             res = res2
 
-    # 标题裁剪（desc 空时）：标题命中足够即丢弃不相关填充，评估看的就是裁剪后的候选
-    if not desc_kws and len(merged) > cfg.booth_limit:
-        low = [k.lower() for k in (kws or [hint]) if k]
-        matched = [it for it in merged
-                   if any(k in (it.get("name") or "").lower() for k in low)]
-        if len(matched) >= cfg.booth_limit:
-            merged = matched
+    # Evaluation and presentation reuse the same bounded full-source details.
+    await execution.stage("details", lambda: _enrich_entries(
+        merged[:min(cfg.booth_limit, 6)], desc_len=-1))
 
     # 阶段 2：结果评估——不满意则第二轮搜索；阶段 3 再评估
     eval_note = ""
     used_terms = kws or [hint]
     if merged and ai_ready:
         try:
-            titles = [f"{i}. {(it.get('name') or '(标题未知)')[:44]}"
-                      for i, it in enumerate(merged[:12], 1)]
-            ev = await _ai_evaluate(hint, used_terms, titles)
+            titles = search_evidence.candidate_lines(merged[:12], desc_kws or used_terms)
+            ev = await execution.stage("evaluate", lambda: _ai_evaluate(hint, used_terms, titles))
             ev = vision.validate_evaluation(ev, titles)
+            ev = search_evidence.grounded_evaluation(ev, merged[:12], desc_kws)
             logger.info(f"第一轮评估: {ev.get('verdict')} {ev.get('reason')}")
             # 保守 retry：评估员放行但标题命中率过低时仍触发二轮
             need_retry = (ev.get("verdict") == "retry" and bool(ev.get("keywords"))) or \
@@ -707,18 +732,21 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
                                           [it.get("name") or "" for it in merged[:6]],
                                           used_terms)
             if need_retry:
+                execution.extend_budget(cfg.retry_request_budget)
                 await _notify("第一轮结果不太对，正在执行第二轮搜索…")
                 if ev.get("keywords"):
-                    kws2 = vision.expand_reading_variants(ev["keywords"])[:6]
+                    kws2 = vision.expand_reading_variants(vision.apply_industry_synonyms(hint, ev["keywords"]))
                 else:
                     # 评估没给词：带教训重新规划
                     try:
                         kws2, _, _ = await _ai_plan(
                             hint, feedback=f"关键词 {used_terms[:4]} 无效（{ev.get('reason') or '候选不相关'}）")
-                        kws2 = vision.expand_reading_variants(kws2)[:6]
+                        kws2 = vision.expand_reading_variants(vision.apply_industry_synonyms(hint, kws2))
                     except Exception as e2:
                         logger.warning(f"二轮重新规划失败: {e2}")
                         kws2 = []
+                previous = {str(term).casefold() for term in used_terms}
+                kws2 = [term for term in kws2 if str(term).casefold() not in previous][:3]
                 if kws2:
                     merged2, res2 = await _search_merged(kws2, adult, page)
                     if merged2:
@@ -729,11 +757,13 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
                             res = res2
                         # 阶段 3：再评估
                         try:
-                            titles2 = [f"{i}. {(it.get('name') or '(标题未知)')[:44]}"
-                                       for i, it in enumerate(merged[:12], 1)]
-                            ev2 = await _ai_evaluate(hint, used_terms, titles2)
+                            fresh = [it for it in merged if not it.get("detail_status")][:3]
+                            await execution.stage("details_round2", lambda: _enrich_entries(fresh, desc_len=-1))
+                            titles2 = search_evidence.candidate_lines(merged[:12], desc_kws or used_terms)
+                            ev2 = await execution.stage("evaluate_round2", lambda: _ai_evaluate(hint, used_terms, titles2))
                             ev2 = vision.validate_evaluation(ev2, titles2)
-                            eval_note = ("第二轮结果已按需求确认" if ev2.get("verdict") == "ok"
+                            ev2 = search_evidence.grounded_evaluation(ev2, merged[:12], desc_kws)
+                            eval_note = ("第二轮找到至少三条有来源证据的相关候选（适配以商品说明为准）" if ev2.get("verdict") == "ok"
                                          else "两轮搜索后仍未完全确认，以下为最接近的结果"
                                               "（可补充材质/颜色/用途等描述再试）")
                         except Exception as e2:
@@ -741,8 +771,11 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
                             eval_note = "已完成第二轮搜索"
                     else:
                         eval_note = "第二轮搜索无结果，以下保留第一轮结果"
+                else:
+                    eval_note = "未得到新的有效检索词，以下候选尚未完全核实"
         except Exception as e:
             logger.warning(f"结果评估失败（按第一轮返回）: {e}")
+            eval_note = "相关性评估暂不可用，以下候选尚未核实"
 
     if not merged:
         web_entries = await _webfind_entries(hint, used_terms, adult)
@@ -753,15 +786,16 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
             return {"text": "搜索服务暂不可用：站内请求均失败，请稍后重试", "entries": []}
         msg = f"Booth 上没搜到「{hint}」{page_note}"
         if used_terms:
-            msg += f"，AI 关键词（{' / '.join(used_terms[:3])}）也未命中"
+            msg += f"，检索词（{' / '.join(used_terms[:3])}）也未命中"
         if ai_notes:
             msg += "\n" + "\n".join(ai_notes)
         return {"text": msg, "entries": []}
 
-    header_notes = ([eval_note] if eval_note else []) + ai_notes
+    for item in merged:
+        item.setdefault("relevance_status", "unknown")
     return await _merged_zh_result(hint, merged, res, used_terms, desc_kws,
                                    page, page_note, "; ".join(ai_notes),
-                                   extra_notes=([eval_note] if eval_note else []))
+                                   extra_notes=([eval_note] if eval_note else []), enrich=False)
 
 
 async def _send_result(bot, event, result: dict, from_cache: bool = False):
@@ -804,13 +838,7 @@ async def handle_vrc_search(bot, event: MessageEvent):
         await matcher.finish(f"查询太频繁：请 {wait} 秒后再试"
                              f"（限流：每人 {plugin_config.user_cooldown} 秒间隔、"
                              f"每分钟 {plugin_config.user_rate_limit} 次）")
-    if not _global_gate.try_acquire():
-        await matcher.finish(f"当前已有 {plugin_config.global_concurrency} 个查询在处理，"
-                             "通道满员，请稍后再试")
-    try:
-        await _do_search(bot, event)
-    finally:
-        _global_gate.release()
+    await _do_search(bot, event)
 
 
 async def _do_search(bot, event: MessageEvent):
@@ -833,15 +861,38 @@ async def _do_search(bot, event: MessageEvent):
         return
 
     try:
+        async def produce(progress):
+            if not _global_gate.try_acquire():
+                return {"text": "搜索通道满员，请稍后再试", "entries": []}
+            try:
+                timeout = max(plugin_config.query_timeout, plugin_config.imgsearch_timeout
+                              + plugin_config.vision_timeout) if urls else plugin_config.query_timeout
+                with execution.query_scope(plugin_config.request_budget, timeout) as context:
+                    if urls:
+                        value = await _handle_image(urls[0], hint)
+                    else:
+                        value = await _handle_text(hint, page=page, notify=progress)
+                    value["metrics"] = {"wire_requests": context["wire_count"], "stages": context["stages"]}
+                    return value
+            finally:
+                _global_gate.release()
+
+        async def listener(message):
+            if hasattr(bot, "send"):
+                await bot.send(event, message)
+
         if urls:
             if not hint:
                 await matcher.send("收到图片，正在反查 Booth（10-60 秒）…")
             else:
                 await matcher.send("收到图片+提示，正在反查 Booth（10-60 秒）…")
-            result = await _handle_image(urls[0], hint)
         else:
             await matcher.send("Booth 搜索中，请稍候（智能链路含 AI 规划与评估，约 30-120 秒）…")
-            result = await _handle_text(hint, page=page, notify=matcher.send)
+        timeout = max(plugin_config.query_timeout, plugin_config.imgsearch_timeout
+                      + plugin_config.vision_timeout) if urls else plugin_config.query_timeout
+        result = await _result_flights.run(cache_key, produce, listener=listener, timeout=timeout)
+    except asyncio.TimeoutError:
+        result = {"text": "本次查询已超时，请稍后重试或补充更具体的关键词", "entries": []}
     except booth_client.BoothCliError as e:
         result = {"text": f"搜索失败: {e}", "entries": []}
     except Exception as e:
@@ -862,13 +913,7 @@ async def handle_vrc_r18(bot, event: MessageEvent):
                                  f"每分钟 {plugin_config.user_rate_limit} 次）")
     if not access.sensitive_allowed(plugin_config, getattr(event, "user_id", "")):
         await r18_matcher.finish(DENY_MSG)
-    if not _global_gate.try_acquire():
-        await r18_matcher.finish(f"当前已有 {plugin_config.global_concurrency} 个查询在处理，"
-                                 "通道满员，请稍后再试")
-    try:
-        await _do_r18(bot, event)
-    finally:
-        _global_gate.release()
+    await _do_r18(bot, event)
 
 
 async def _do_r18(bot, event: MessageEvent):
@@ -884,9 +929,23 @@ async def _do_r18(bot, event: MessageEvent):
         await _send_result(bot, event, cached, from_cache=True)
         return
     try:
-        result = await _handle_text(hint, adult="only", page=page,
-                                    notify=r18_matcher.send)
+        async def produce(progress):
+            if not _global_gate.try_acquire():
+                return {"text": "搜索通道满员，请稍后再试", "entries": []}
+            try:
+                return await _handle_text(hint, adult="only", page=page, notify=progress)
+            finally:
+                _global_gate.release()
+
+        async def listener(message):
+            if hasattr(bot, "send"):
+                await bot.send(event, message)
+
+        result = await _result_flights.run(cache_key, produce, listener=listener,
+                                          timeout=plugin_config.query_timeout)
         result["command"] = "r18"
+    except asyncio.TimeoutError:
+        result = {"text": "本次查询已超时，请稍后重试或补充更具体的关键词", "entries": []}
     except booth_client.BoothCliError as e:
         result = {"text": f"搜索失败: {e}", "entries": []}
     except Exception as e:

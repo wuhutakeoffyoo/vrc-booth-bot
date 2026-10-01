@@ -7,6 +7,9 @@ import json
 import hashlib
 import sqlite3
 import time
+import shutil
+import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 DB_PATH = Path.home() / ".vrc-booth-bot" / "query_cache.sqlite3"
@@ -23,7 +26,12 @@ def _db():
             DB_PATH.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(str(DB_PATH), timeout=3)
             conn.execute("CREATE TABLE IF NOT EXISTS qcache "
-                         "(key TEXT PRIMARY KEY, ts REAL, payload TEXT)")
+                         "(key TEXT PRIMARY KEY, ts REAL, payload TEXT, expires REAL)")
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(qcache)")}
+            if "expires" not in columns:
+                conn.execute("ALTER TABLE qcache ADD COLUMN expires REAL")
+                conn.execute("UPDATE qcache SET expires=ts+? WHERE expires IS NULL", (DEFAULT_TTL,))
+            conn.commit()
             _conn = conn
         except Exception:
             _conn = False
@@ -33,7 +41,46 @@ def _db():
 # 结果语义版本：前缀进缓存 key。凡影响结果内容的代码变更（策略/格式/修复）部署时
 # 必须递增，让旧缓存整体失效——否则新代码上线后 TTL 内用户拿到的仍是修复前
 # 的旧结果（2026-09-30「铃铛」事故：修复已上线，用户却命中旧缓存以为没优化）
-CACHE_VERSION = "8"
+CACHE_VERSION = "9"
+
+
+@lru_cache(maxsize=8)
+def semantic_fingerprint(cli_path=""):
+    """Startup fingerprint of explicit source files; never hash credentials."""
+    digest = hashlib.sha256()
+    base = Path(__file__).resolve().parent
+    names = ("__init__.py", "config.py", "qcache.py", "booth_client.py", "execution.py",
+             "vision.py", "rank.py", "format.py", "forward.py", "result_policy.py",
+             "webfind.py", "search_evidence.py", "image_download.py")
+    for name in names:
+        digest.update(name.encode() + b"\0")
+        path = base / name
+        digest.update(path.read_bytes() if path.is_file() else b"missing")
+    resolved = cli_path or shutil.which("booth") or ""
+    parent = Path(resolved).resolve() if resolved else None
+    if parent and parent.is_file() and parent.suffix.lower() == ".py":
+        for name in ("booth.py", "smart_search.py", "reverse_search.py",
+                     "request_budget.py", "search_evidence.py"):
+            path = parent.parent / name
+            digest.update(name.encode() + b"\0")
+            digest.update(path.read_bytes() if path.is_file() else b"missing")
+    elif parent and parent.is_file():
+        # Installed wrapper/symlink may remain unchanged across releases.
+        try:
+            proc = subprocess.run([str(parent), "bot", '{"action":"version"}'],
+                                  capture_output=True, text=True, encoding="utf-8", timeout=15)
+            data = json.loads(proc.stdout.strip().splitlines()[-1]).get("data") or {}
+            identity = data.get("semantic_fingerprint")
+            if not identity:
+                raise ValueError("CLI semantic identity unavailable")
+            digest.update(str(identity).encode())
+        except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+            # No stable CLI identity: this process cannot reuse persistent keys
+            # from another startup. Normal execution will report CLI errors.
+            digest.update(str(time.time_ns()).encode())
+    else:
+        digest.update(b"cli-unavailable")
+    return digest.hexdigest()
 
 
 def make_key(*parts) -> str:
@@ -48,6 +95,10 @@ def configuration_key(cfg) -> str:
              "websearch_fallback", "booth_cli_path", "vision_base_url",
              "fallback_base_url", "ai_cli_bin")
     data = {name: getattr(cfg, name) for name in names}
+    for name in ("request_budget", "retry_request_budget", "query_timeout",
+                 "search_candidate_limit", "plan_cache_ttl", "run_profile", "benchmark_allow_ai"):
+        data[name] = getattr(cfg, name, None)
+    data["semantic"] = semantic_fingerprint(cfg.booth_cli_path)
     data["primary_available"] = bool(cfg.vision_api_key)
     data["fallback_available"] = bool(cfg.fallback_api_key)
     data["exa_available"] = bool(cfg.exa_api_key)
@@ -60,11 +111,11 @@ def get(key: str, ttl: int):
     if not conn:
         return None
     try:
-        row = conn.execute("SELECT ts, payload FROM qcache WHERE key = ?",
+        row = conn.execute("SELECT ts, payload, expires FROM qcache WHERE key = ?",
                            (key,)).fetchone()
     except sqlite3.Error:
         return None
-    if not row or time.time() - row[0] > ttl:
+    if not row or time.time() - row[0] > ttl or (row[2] is not None and row[2] < time.time()):
         return None
     try:
         return json.loads(row[1])
@@ -80,9 +131,9 @@ def put(key: str, payload: dict, ttl: int = DEFAULT_TTL,
         return
     now = time.time()
     try:
-        conn.execute("INSERT OR REPLACE INTO qcache (key, ts, payload) VALUES (?,?,?)",
-                     (key, now, json.dumps(payload, ensure_ascii=False)))
-        conn.execute("DELETE FROM qcache WHERE ts < ?", (now - ttl,))
+        conn.execute("INSERT OR REPLACE INTO qcache (key, ts, payload, expires) VALUES (?,?,?,?)",
+                     (key, now, json.dumps(payload, ensure_ascii=False), now+ttl))
+        conn.execute("DELETE FROM qcache WHERE expires < ?", (now,))
         conn.execute("DELETE FROM qcache WHERE key NOT IN "
                      "(SELECT key FROM qcache ORDER BY ts DESC LIMIT ?)",
                      (max_entries,))
