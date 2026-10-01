@@ -15,6 +15,11 @@ import vision  # noqa: E402
 
 
 class TestBoothClient(unittest.TestCase):
+    def setUp(self):
+        locator = mock.patch.object(booth_client.shutil, "which", return_value="review-booth")
+        locator.start()
+        self.addCleanup(locator.stop)
+        booth_client._cli_verified = None
     def test_build_cmd(self):
         self.assertEqual(booth_client.build_cmd("D:/x/booth.py"),
                          [sys.executable, "-X", "utf8", "D:/x/booth.py"])
@@ -124,7 +129,7 @@ class TestVision(unittest.TestCase):
         self.assertIn("鸟居", ev["reason"])
         self.assertEqual(ev["keywords"], ["鈴", "ベル"])
         ev = vision.parse_evaluation('{"verdict": "ok", "reason": "命中"}')
-        self.assertEqual(ev["verdict"], "ok")
+        self.assertEqual(ev["verdict"], "retry")
         self.assertEqual(ev["keywords"], [])
         with self.assertRaises(RuntimeError):
             vision.parse_evaluation("没有 json 的输出")

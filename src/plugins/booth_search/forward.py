@@ -6,7 +6,7 @@
 import asyncio
 import base64
 
-import httpx
+from .image_download import DEFAULT_HOSTS, download_image
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
 from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
@@ -30,19 +30,16 @@ def _thumb_url(url: str | None) -> str | None:
     return url
 
 
-async def _image_segment(url: str | None, sem: asyncio.Semaphore):
+async def _image_segment(url: str | None, sem: asyncio.Semaphore, allowed_hosts=DEFAULT_HOSTS):
     if not url:
         return None
     url = _thumb_url(url)
     async with sem:
         for attempt in range(2):
             try:
-                async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-                    resp = await client.get(url, headers=_HEADERS)
-                    resp.raise_for_status()
-                    if len(resp.content) >= 100:
-                        b64 = base64.b64encode(resp.content).decode()
-                        return MessageSegment.image("base64://" + b64)
+                content = await download_image(url, allowed_hosts=allowed_hosts, timeout=20)
+                b64 = base64.b64encode(content).decode()
+                return MessageSegment.image("base64://" + b64)
             except Exception as e:
                 logger.debug(f"转发图片下载失败({url[:60]}): {e}")
                 if attempt == 1:
@@ -61,22 +58,24 @@ async def build_result_nodes(self_id: int, header: str, notes: list,
                              entries: list, max_n: int = 6,
                              nickname: str = "Booth 搜索",
                              page: int = 1, query_hint: str = "",
-                             total: int | None = None) -> list:
+                             total: int | None = None, command: str = "search",
+                             has_next: bool | None = None, allowed_hosts=DEFAULT_HOSTS) -> list:
     """构建转发节点：摘要节点（含翻页提示）+ 每商品一节点（图+文字）。"""
     sem = asyncio.Semaphore(3)
     top = entries[:max_n]
     imgs = await asyncio.gather(
-        *[_image_segment(entry_image_url(it), sem) for it in top])
+        *[_image_segment(entry_image_url(it), sem, allowed_hosts) for it in top])
 
     head_lines = [header]
     for note in notes:
         head_lines.append(note)
     # 翻页提示：还有更多结果时提示页码指令
-    if total and total > page * max_n:
+    if has_next if has_next is not None else (total and total > page * max_n):
+        command = "r18" if command == "r18" else "search"
         if query_hint:
-            head_lines.append(f"翻下一页：/vrc search {query_hint} {page + 1}")
+            head_lines.append(f"翻下一页：/vrc {command} {query_hint} {page + 1}")
         else:
-            head_lines.append(f"翻下一页：/vrc search <关键词> {page + 1}")
+            head_lines.append(f"翻下一页：/vrc {command} <关键词> {page + 1}")
     head_segs = [MessageSegment.text("\n".join(head_lines))]
     nodes = [_node(self_id, nickname, head_segs)]
 

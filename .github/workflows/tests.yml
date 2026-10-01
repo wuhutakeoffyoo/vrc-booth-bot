@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e .
+      - run: python -m unittest discover -s tests -v
+      - run: python -m compileall -q src tests integration
+      - uses: actions/checkout@v4
+        with:
+          repository: wuhutakeoffyoo/booth-cli
+          ref: 3c30a08da2d30d39f438bb3118cafe7412eed20b
+          path: parent-cli
+      - run: python -m unittest discover -s integration -p '*contract.py' -v
+        env:
+          BOOTH_CLI_TEST_PATH: ${{ github.workspace }}/parent-cli/booth.py

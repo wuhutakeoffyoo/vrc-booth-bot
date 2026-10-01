@@ -21,6 +21,8 @@ from nonebot.rule import Rule
 
 from . import access, booth_client, forward, qcache, rank, vision, webfind
 from .config import Config
+from .image_download import ImageDownloadError, download_image
+from .result_policy import filter_entries
 from .format import format_results
 
 plugin_config = get_plugin_config(Config)
@@ -100,22 +102,13 @@ def _collect_image_urls(event: MessageEvent) -> list:
 
 async def _download_image(url: str) -> bytes:
     """下载 QQ 消息里的图片；pximg CDN 偶发 5xx，带退避重试。"""
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://booth.pm/"}
-    last_err: Exception | None = None
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                resp = await client.get(url, headers=headers)
-                resp.raise_for_status()
-                if len(resp.content) < 100:
-                    raise booth_client.BoothCliError("图片下载内容异常（过短）")
-                return resp.content
-        except httpx.HTTPStatusError as e:
-            last_err = e
-            if e.response.status_code < 500:
+            return await download_image(url, allowed_hosts=plugin_config.image_allowed_hosts)
+        except ImageDownloadError as e:
+            if "HTTP 5" not in str(e) or attempt == 2:
                 raise
             await asyncio.sleep(1.5 * (attempt + 1))
-    raise last_err
 
 
 def _ai_backend() -> tuple[str, str]:
@@ -127,9 +120,13 @@ def _ai_backend() -> tuple[str, str]:
             return "cli", vision.resolve_cli_bin(cfg.ai_cli_bin)
         except RuntimeError as e:
             logger.warning(f"opencode CLI 不可用: {e}")
-            return "", ""
-    if cfg.vision_api_key:
+    if cfg.vision_api_key or cfg.fallback_api_key:
         return "api", ""
+    if cfg.ai_mode != "cli":
+        try:
+            return "cli", vision.resolve_cli_bin(cfg.ai_cli_bin)
+        except RuntimeError:
+            pass
     return "", ""
 
 
@@ -171,6 +168,8 @@ async def _ai_recall(desc: str) -> list:
     """知名商品回忆：利用模型 VRChat 圈知识产出具体商品名（api 双路，不回落 cli）。"""
     cfg = plugin_config
     try:
+        if not cfg.vision_api_key:
+            raise BoothUnavailable("主 API 未配置")
         return await vision.recall_products(
             desc, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
             model=cfg.vision_model, session_id=cfg.vision_session_id,
@@ -192,6 +191,8 @@ async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
     mode, param = _ai_backend()
     if mode == "api":
         try:
+            if not cfg.vision_api_key:
+                raise BoothUnavailable("主 API 未配置")
             image_bytes = Path(image_path).read_bytes()
             result = await vision.extract_keywords(
                 image_bytes, hint=hint, base_url=cfg.vision_base_url,
@@ -247,17 +248,19 @@ async def _enrich_entries(entries: list, desc_len: int = 600) -> None:
                     booth_client.item, it.get("id"), desc_len=desc_len,
                     cli_path=cfg.booth_cli_path, timeout=cfg.search_timeout)
             except Exception:
+                it["detail_status"] = "unavailable"
                 return
-            for k in ("wish_lists_count", "tags", "published_at"):
+            for k in ("wish_lists_count", "tags", "published_at", "is_adult", "is_vrchat"):
                 v = detail.get(k)
-                if v:
+                if v is not None:
                     it[k] = v
             it["_desc"] = detail.get("description") or ""
+            it["detail_status"] = "available"
 
     await asyncio.gather(*[one(it) for it in entries])
 
 
-async def _webfind_entries(hint: str, kws: list) -> list:
+async def _webfind_entries(hint: str, kws: list, adult: str | None = None) -> list:
     """网络检索兜底：站内搜不到时从 DDG/Exa 找 booth.pm 商品链接并抓详情。"""
     cfg = plugin_config
     if not cfg.websearch_fallback:
@@ -272,33 +275,29 @@ async def _webfind_entries(hint: str, kws: list) -> list:
     entries = []
     for iid in ids[:3]:
         try:
-            it = booth_client.item(iid, cli_path=cfg.booth_cli_path,
-                                   timeout=cfg.search_timeout)
+            it = await asyncio.to_thread(
+                booth_client.item, iid, cli_path=cfg.booth_cli_path,
+                timeout=cfg.search_timeout)
             it["via"] = "网络检索"
             entries.append(it)
         except booth_client.BoothCliError:
             continue
-    return entries
+    return filter_entries(entries, adult or cfg.r18_mode, cfg.vrc_tag)
 
 
 async def _handle_image(image_url: str, hint: str) -> dict:
+    try:
+        image_bytes = await _download_image(image_url)
+    except ImageDownloadError as e:
+        return {"text": f"⚠ {e}", "entries": []}
+    except httpx.HTTPError:
+        return {"text": "⚠ 图片下载失败：网络异常，请稍后重发", "entries": []}
+    return await _handle_image_bytes(image_bytes, hint)
+
+
+async def _handle_image_bytes(image_bytes: bytes, hint: str) -> dict:
+    """内部盲测入口：直接注入样本字节，不暴露消息 URL 本地读文件通道。"""
     cfg = plugin_config
-    if image_url.startswith("file://"):
-        # 本地文件直读（盲测/调试通道）
-        try:
-            image_bytes = Path(image_url[7:]).read_bytes()
-        except OSError as e:
-            return {"text": f"⚠ 本地图片读取失败: {e}", "entries": []}
-    else:
-        try:
-            image_bytes = await _download_image(image_url)
-        except httpx.HTTPStatusError as e:
-            code = e.response.status_code
-            tip = ("图床临时不可用（5xx），请稍后重发"
-                   if code >= 500 else f"图片下载失败（HTTP {code}），确认图片链接有效")
-            return {"text": f"⚠ {tip}", "entries": []}
-        except httpx.TransportError:
-            return {"text": "⚠ 图片下载失败：网络异常，请稍后重发", "entries": []}
 
     # 1) 识图 AI 提词（AI 不可用则跳过，仅靠 CLI 自带派生词）
     keywords, item_type = [], ""
@@ -325,17 +324,19 @@ async def _handle_image(image_url: str, hint: str) -> dict:
 
     # 2) CLI 反向图搜
     matches = []
+    image_search_succeeded = False
     derived = ""  # Bing 对图内日文标题的 OCR，常含正确词形
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tf:
             tf.write(image_bytes)
             tmp_path = tf.name
-        data = booth_client.imgsearch(
-            tmp_path, headless=cfg.imgsearch_headless,
+        data = await asyncio.to_thread(
+            booth_client.imgsearch, tmp_path, headless=cfg.imgsearch_headless,
             limit=max(cfg.booth_limit, 10), cli_path=cfg.booth_cli_path,
             timeout=cfg.imgsearch_timeout)
         matches = data.get("matches") or []
+        image_search_succeeded = True
         derived = (data.get("derived_query") or "").strip()
         if derived and derived not in keywords:
             keywords.append(derived)
@@ -364,16 +365,19 @@ async def _handle_image(image_url: str, hint: str) -> dict:
     seen = {m.get("id") for m in matches}
     kw_hits = []
     recall_limit = max(cfg.booth_limit, 10)
+    keyword_search_succeeded = False
     for kw in search_kws[:3]:
         try:
-            res = booth_client.search(kw, limit=recall_limit,
+            res = await asyncio.to_thread(booth_client.search, kw, limit=recall_limit,
                                       sort=cfg.booth_sort, adult=cfg.r18_mode,
                                       tag=(cfg.vrc_tag or None), cli_path=cfg.booth_cli_path,
                                       timeout=cfg.search_timeout)
         except booth_client.BoothCliError as e:
             logger.warning(f"关键词搜索失败({kw}): {e}")
             continue
+        keyword_search_succeeded = True
         for it in res.get("items") or []:
+            it["_search_tag"] = cfg.vrc_tag
             if it["id"] not in seen:
                 it["via"] = "关键词"
                 seen.add(it["id"])
@@ -383,7 +387,7 @@ async def _handle_image(image_url: str, hint: str) -> dict:
     def _rel(it):
         name = (it.get("name") or "").lower()
         return any(k in name for k in low_all)
-    merged = list(matches) + kw_hits
+    merged = filter_entries(list(matches) + kw_hits, cfg.r18_mode, cfg.vrc_tag)
     dedup, seen2 = [], set()
     for it in merged:
         if it.get("id") not in seen2:
@@ -393,6 +397,8 @@ async def _handle_image(image_url: str, hint: str) -> dict:
         dedup.sort(key=lambda it: not _rel(it))
 
     if not dedup:
+        if not image_search_succeeded and not keyword_search_succeeded:
+            return {"text": "搜索服务暂不可用：图搜及关键词请求未能完成，请稍后重试", "entries": []}
         msg = ("没找到相关 Booth 商品。识别关键词: "
                + (" / ".join(search_kws[:5]) or "（无）"))
         text = f"{msg}\n{ai_note}" if ai_note else msg
@@ -478,12 +484,15 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
                 return None
 
     results = await asyncio.gather(*[_one(kw) for kw in terms[:6]])
+    succeeded = sum(res is not None for res in results)
+    failures = len(results) - succeeded
     for res in results:
         if res is None:
             continue
         if not first_res:
             first_res = res
         for it in res.get("items") or []:
+            it["_search_tag"] = cfg.vrc_tag
             if it["id"] not in seen:
                 it["via"] = "关键词"
                 seen.add(it["id"])
@@ -500,7 +509,12 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
     if sort_note:
         first_res = dict(first_res or {})
         first_res["sort_note"] = sort_note
-    return merged, first_res
+    first_res = dict(first_res)
+    first_res["_search_successes"] = succeeded
+    first_res["_search_failures"] = failures
+    first_res["_all_failed"] = bool(results) and succeeded == 0
+    first_res["has_next"] = any(res.get("has_next") for res in results if res is not None)
+    return filter_entries(merged, adult or cfg.r18_mode, cfg.vrc_tag), first_res
 
 
 async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
@@ -521,6 +535,8 @@ async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
     header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
               if res.get("total") else f"前 {shown}:{page_note}{sn}")
     header = f"{header}\nAI 关键词: {' / '.join(kws[:3])}（原词「{hint}」）"
+    if res.get("_search_failures"):
+        header += "\n部分关键词请求失败，展示已取得的结果"
     for note in extra_notes:
         header += f"\n{note}"
     if not desc_kws and len(merged) > cfg.booth_limit:
@@ -534,22 +550,31 @@ async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
     if desc_kws:
         await _enrich_entries(merged[:15], desc_len=2000)
         merged = rank.desc_boost(merged, kws, desc_kws)
-        n_hit = sum(1 for it in merged if rank.desc_hit(it, desc_kws))
-        header += (f"\n已按商品说明核实「{' / '.join(desc_kws[:2])}」:{n_hit} 件命中"
+        n_hit = sum(1 for it in merged if rank.description_status(it, desc_kws) == "mentioned")
+        header += (f"\n商品说明中提及「{' / '.join(desc_kws[:2])}」:{n_hit} 件（未确认兼容性）"
                    if n_hit else
-                   "\n商品说明里未核实到对应信息，按标题相关度展示")
+                   "\n商品说明未提供可确认的兼容性证据，按关键词相关度展示")
     else:
         await _enrich_entries(merged[:cfg.booth_limit])
     return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
             "entries": merged, "header": header,
             "notes": ([ai_note] if ai_note else []) + extra_notes,
-            "page": page, "qhint": hint, "total": res.get("total")}
+            "page": page, "qhint": hint, "total": res.get("total"),
+            "has_next": res.get("has_next")}
 
 
 async def _ai_plan(text: str, feedback: str = "") -> tuple[list, list, bool]:
     """需求 → 搜索方案（主 api → 兜底 api）。都不可用抛 BoothUnavailable。
     feedback：保守重试场景告知第一轮教训。返回 (标题关键词, desc_keywords, 是否翻译)。"""
     cfg = plugin_config
+    mode, param = _ai_backend()
+    if mode == "cli":
+        try:
+            return await vision.plan_search_cli(
+                text, bin_path=param, model=cfg.ai_cli_model,
+                timeout=cfg.ai_cli_timeout, feedback=feedback)
+        except Exception as e:
+            logger.warning(f"CLI 方案规划失败: {vision.friendly_ai_error(e)}")
     if cfg.vision_api_key:
         try:
             return await vision.plan_search(
@@ -566,12 +591,27 @@ async def _ai_plan(text: str, feedback: str = "") -> tuple[list, list, bool]:
                 feedback=feedback)
         except Exception as e:
             logger.warning(f"兜底 api 方案规划失败: {vision.friendly_ai_error(e)}")
-    raise BoothUnavailable("方案规划不可用（主/兜底 api）")
+    if mode != "cli":
+        try:
+            return await vision.plan_search_cli(
+                text, bin_path=vision.resolve_cli_bin(cfg.ai_cli_bin),
+                model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout, feedback=feedback)
+        except Exception:
+            pass
+    raise BoothUnavailable("方案规划不可用（主/兜底 api/cli）")
 
 
 async def _ai_evaluate(query: str, keywords: list, titles: list) -> dict:
     """结果评估（主 api → 兜底 api）。都不可用抛 BoothUnavailable。"""
     cfg = plugin_config
+    mode, param = _ai_backend()
+    if mode == "cli":
+        try:
+            return await vision.evaluate_results_cli(
+                query, keywords, titles, bin_path=param, model=cfg.ai_cli_model,
+                timeout=cfg.ai_cli_timeout)
+        except Exception as e:
+            logger.warning(f"CLI 结果评估失败: {vision.friendly_ai_error(e)}")
     if cfg.vision_api_key:
         try:
             return await vision.evaluate_results(
@@ -588,7 +628,14 @@ async def _ai_evaluate(query: str, keywords: list, titles: list) -> dict:
                 timeout=cfg.vision_timeout)
         except Exception as e:
             logger.warning(f"兜底 api 结果评估失败: {vision.friendly_ai_error(e)}")
-    raise BoothUnavailable("结果评估不可用（主/兜底 api）")
+    if mode != "cli":
+        try:
+            return await vision.evaluate_results_cli(
+                query, keywords, titles, bin_path=vision.resolve_cli_bin(cfg.ai_cli_bin),
+                model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
+        except Exception:
+            pass
+    raise BoothUnavailable("结果评估不可用（主/兜底 api/cli）")
 
 
 async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
@@ -603,7 +650,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
     cfg = plugin_config
     page_note = f"（第 {page} 页）" if page > 1 else ""
     ai_mode, _ = _ai_backend()
-    ai_ready = ai_mode == "api"
+    ai_ready = bool(ai_mode)
     ai_notes: list = []
 
     async def _notify(msg: str):
@@ -633,7 +680,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
     if not merged and kws:
         # 方案词无果，退回原词直搜（日文输入时方案词可能反而偏）
         merged, res2 = await _search_merged([hint], adult, page)
-        if res2.get("total") and not res.get("total"):
+        if res2.get("_search_successes") or (res2.get("total") and not res.get("total")):
             res = res2
 
     # 标题裁剪（desc 空时）：标题命中足够即丢弃不相关填充，评估看的就是裁剪后的候选
@@ -652,6 +699,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
             titles = [f"{i}. {(it.get('name') or '(标题未知)')[:44]}"
                       for i, it in enumerate(merged[:12], 1)]
             ev = await _ai_evaluate(hint, used_terms, titles)
+            ev = vision.validate_evaluation(ev, titles)
             logger.info(f"第一轮评估: {ev.get('verdict')} {ev.get('reason')}")
             # 保守 retry：评估员放行但标题命中率过低时仍触发二轮
             need_retry = (ev.get("verdict") == "retry" and bool(ev.get("keywords"))) or \
@@ -684,6 +732,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
                             titles2 = [f"{i}. {(it.get('name') or '(标题未知)')[:44]}"
                                        for i, it in enumerate(merged[:12], 1)]
                             ev2 = await _ai_evaluate(hint, used_terms, titles2)
+                            ev2 = vision.validate_evaluation(ev2, titles2)
                             eval_note = ("第二轮结果已按需求确认" if ev2.get("verdict") == "ok"
                                          else "两轮搜索后仍未完全确认，以下为最接近的结果"
                                               "（可补充材质/颜色/用途等描述再试）")
@@ -696,10 +745,12 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
             logger.warning(f"结果评估失败（按第一轮返回）: {e}")
 
     if not merged:
-        web_entries = await _webfind_entries(hint, used_terms)
+        web_entries = await _webfind_entries(hint, used_terms, adult)
         if web_entries:
             return {"text": format_results(web_entries, max_n=3,
                     title=f"网络检索命中（站内无「{hint}」）:"), "entries": web_entries}
+        if res.get("_all_failed"):
+            return {"text": "搜索服务暂不可用：站内请求均失败，请稍后重试", "entries": []}
         msg = f"Booth 上没搜到「{hint}」{page_note}"
         if used_terms:
             msg += f"，AI 关键词（{' / '.join(used_terms[:3])}）也未命中"
@@ -717,16 +768,23 @@ async def _send_result(bot, event, result: dict, from_cache: bool = False):
     """优先合并转发（含商品图），失败或无条目时回退纯文本（注明降级原因）。
     超时类失败由 forward.send 按「可能已送达」处理，不会走到这里造成重复。"""
     cfg = plugin_config
-    entries = result.get("entries") or []
+    adult = "only" if result.get("command") == "r18" else cfg.r18_mode
+    entries = filter_entries(result.get("entries") or [], adult, cfg.vrc_tag)
     header = result.get("header") or ""
     if from_cache and header:
         header = header + "\n（缓存结果，可能非最新）"
     text = result["text"]
+    if len(entries) != len(result.get("entries") or []):
+        header = f"符合当前筛选条件的结果：{len(entries)} 件"
+        text = format_results(entries, max_n=cfg.booth_limit, title=header)
     if cfg.forward_messages and entries:
         try:
             nodes = await forward.build_result_nodes(
                 int(bot.self_id), header,
-                result.get("notes") or [], entries, max_n=cfg.booth_limit)
+                result.get("notes") or [], entries, max_n=cfg.booth_limit,
+                page=result.get("page", 1), query_hint=result.get("qhint", ""),
+                total=result.get("total"), has_next=result.get("has_next"),
+                command=result.get("command", "search"), allowed_hosts=cfg.image_allowed_hosts)
         except Exception as e:
             logger.warning(f"转发节点构建失败: {e}")
             nodes = None
@@ -766,7 +824,7 @@ async def _do_search(bot, event: MessageEvent):
 
     # 查询缓存：相同查询（模式/页码/词）在 TTL 内直接回缓存结果，省 AI 额度
     cache_key = qcache.make_key("search", plugin_config.r18_mode, page,
-                                hint, urls[0] if urls else "")
+                                hint, urls[0] if urls else "", qcache.configuration_key(plugin_config))
     cached = (qcache.get(cache_key, plugin_config.query_cache_ttl)
               if plugin_config.query_cache_ttl > 0 and not urls else None)
     if cached is not None:
@@ -819,7 +877,7 @@ async def _do_r18(bot, event: MessageEvent):
     hint, page = _split_page(hint)
     if not hint:
         await r18_matcher.finish("用法: /vrc r18 <关键词>（R-18 专项搜索，仅管理员）")
-    cache_key = qcache.make_key("r18", page, hint)
+    cache_key = qcache.make_key("r18", page, hint, qcache.configuration_key(plugin_config))
     cached = (qcache.get(cache_key, plugin_config.query_cache_ttl)
               if plugin_config.query_cache_ttl > 0 else None)
     if cached is not None:
@@ -828,6 +886,7 @@ async def _do_r18(bot, event: MessageEvent):
     try:
         result = await _handle_text(hint, adult="only", page=page,
                                     notify=r18_matcher.send)
+        result["command"] = "r18"
     except booth_client.BoothCliError as e:
         result = {"text": f"搜索失败: {e}", "entries": []}
     except Exception as e:

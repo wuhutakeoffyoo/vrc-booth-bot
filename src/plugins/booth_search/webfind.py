@@ -5,6 +5,7 @@
 
 仅返回 booth.pm / *.booth.pm 的商品链接与 ID。无外部依赖（httpx）。
 """
+import html
 import re
 import urllib.parse
 
@@ -12,36 +13,47 @@ import httpx
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36"}
-_ITEM_RE = re.compile(r"booth\.pm/(?:[a-z]{2}/)?items/(\d+)")
-_SUB_ITEM_RE = re.compile(r"([a-z0-9-]+)\.booth\.pm/(?:[a-z]{2}/)?items/(\d+)")
 
 
 def item_ids_from_urls(urls: list) -> list:
     """从 URL 列表按出现顺序提取商品 ID（去重）。"""
     ids = []
     for u in urls:
-        m = _ITEM_RE.search(u) or _SUB_ITEM_RE.search(u)
+        try:
+            parts = urllib.parse.urlsplit(u)
+            host = (parts.hostname or "").lower()
+            if (parts.scheme not in ("http", "https") or parts.username or parts.password
+                    or (host != "booth.pm" and not host.endswith(".booth.pm"))):
+                continue
+            m = re.fullmatch(r"/(?:[a-z]{2}/)?items/(\d+)/?", parts.path)
+        except ValueError:
+            continue
         if m:
-            last = m.group(1) if m.lastindex == 1 else m.group(2)
-            iid = int(last)
+            iid = int(m.group(1))
             if iid not in ids:
                 ids.append(iid)
     return ids
 
 
-def ids_from_ddg_html(html: str) -> list:
+def ids_from_ddg_html(content: str) -> list:
     """解析 DDG HTML 结果页里的 booth 商品链接。"""
     urls = []
-    for m in re.finditer(r'href="([^"]+)"', html):
-        href = urllib.parse.unquote(m.group(1))
-        if "booth.pm" in href:
-            urls.append(href)
+    for m in re.finditer(r'href="([^"]+)"', content or ""):
+        href = html.unescape(m.group(1))
+        try:
+            parts = urllib.parse.urlsplit(href)
+            host = (parts.hostname or "").lower()
+            if host == "duckduckgo.com" or host.endswith(".duckduckgo.com"):
+                href = urllib.parse.parse_qs(parts.query).get("uddg", [href])[0]
+        except ValueError:
+            continue
+        urls.append(href)
     return item_ids_from_urls(urls)
 
 
 async def ddg_find(keywords: str, timeout: int = 15) -> list:
     """DuckDuckGo HTML 检索 <keywords> booth.pm，返回商品 ID 列表。"""
-    q = urllib.parse.quote(f"{keywords} booth.pm")
+    q = f"{keywords} booth.pm"
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
                                      headers=_HEADERS) as client:
@@ -56,7 +68,7 @@ async def ddg_find(keywords: str, timeout: int = 15) -> list:
 async def exa_find(keywords: str, api_key: str, timeout: int = 15) -> list:
     """Exa AI 搜索（可选）：限定 booth.pm 域名，返回商品 ID 列表。"""
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             resp = await client.post(
                 "https://api.exa.ai/search",
                 json={"query": keywords, "numResults": 8,
