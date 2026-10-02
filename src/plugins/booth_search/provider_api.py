@@ -346,7 +346,7 @@ def reject_image(base_url, api_key, model):
     return result
 
 
-def exa_url(base_url):
+def public_url(base_url):
     url = guard_url(base_url)
     parts = urllib.parse.urlsplit(url)
     try:
@@ -354,5 +354,11 @@ def exa_url(base_url):
         if not addresses or any(not ipaddress.ip_address(info[4][0]).is_global for info in addresses):
             raise ValueError()
     except (OSError, ValueError):
-        raise ProviderError("Exa 端点必须解析到公网地址") from None
+        raise ProviderError("检索端点必须解析到公网地址") from None
+    return url
+
+
+def exa_url(base_url):
+    url = public_url(base_url)
+    parts = urllib.parse.urlsplit(url)
     return url if parts.path.endswith("/search") else url + "/search"

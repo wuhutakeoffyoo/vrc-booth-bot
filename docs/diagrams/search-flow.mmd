@@ -1,0 +1,16 @@
+%%{init: {"markdownAutoWrap":false,"fontFamily":"Microsoft YaHei","fontSize":18,"theme":"base","themeVariables":{"fontFamily":"Noto Sans CJK SC, Microsoft YaHei, sans-serif","fontSize":"18px","primaryColor":"#e8f1ff","primaryBorderColor":"#527db3","primaryTextColor":"#17324d","lineColor":"#7890a5","secondaryColor":"#eff8f2","tertiaryColor":"#fff6e6"},"flowchart":{"curve":"basis","wrappingWidth":400,"nodeSpacing":35,"rankSpacing":45}}}%%
+flowchart TD
+    A["QQ 命令<br/>权限与频率检查<br/>参数检查"] --> B{"结果缓存命中？"}
+    B -->|"是"| I["按各用户消息事件<br/>发送搜索结果"]
+    B -->|"否"| C["相同在途查询<br/>共享一个生产任务"]
+    C --> D["复用初始方案<br/>或调用用户选择的 AI"]
+    D --> E["CLI 多词检索与有限详情<br/>可选网页搜索补充"]
+    E --> F["原文证据评估"]
+    F --> G["必要时一次二轮<br/>检索与再评估"]
+    G --> H["逐商品状态与来源<br/>成功结果写入缓存"]
+    H --> I
+    J["CLI 共享间隔<br/>冷却与请求预算"] -.-> E
+    J -.-> G
+    K["Bot 完整任务总超时"] -.-> C
+    classDef guard fill:#fff6e6,stroke:#b2945b,color:#76572c
+    class J,K guard

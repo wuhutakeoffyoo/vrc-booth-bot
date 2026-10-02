@@ -1,0 +1,18 @@
+%%{init: {"markdownAutoWrap":false,"fontFamily":"Microsoft YaHei","fontSize":18,"theme":"base","themeVariables":{"fontFamily":"Noto Sans CJK SC, Microsoft YaHei, sans-serif","fontSize":"18px","primaryColor":"#e8f1ff","primaryBorderColor":"#527db3","primaryTextColor":"#17324d","lineColor":"#7890a5","secondaryColor":"#eff8f2","tertiaryColor":"#fff6e6"},"flowchart":{"curve":"basis","wrappingWidth":400,"nodeSpacing":35,"rankSpacing":45}}}%%
+flowchart TD
+    A["用户配置 API key + URL<br/>模型名可选"] --> B["发现或固定模型"]
+    B --> C{"服务明确声明<br/>只支持文字？"}
+    C -->|"是"| F["关闭所有图片搜索入口<br/>提示限制，保留文字搜索"]
+    C -->|"否或未声明"| D["随机合成彩图检测<br/>不使用用户图片"]
+    D --> E{"准确读取<br/>随机颜色顺序？"}
+    E -->|"通过"| G["开启图片输入<br/>识图提词与图片反查"]
+    E -->|"未通过或暂不可用"| F
+    F --> H["接入其他多模态 API<br/>或稍后重新检测"]
+    H -.-> B
+    G --> I{"真实图片请求<br/>明确被拒绝？"}
+    I -->|"是"| F
+    I -->|"否"| J["继续图片查询"]
+    classDef closed fill:#fff0ec,stroke:#c17a62,color:#7b3c2a
+    classDef open fill:#e7f5ec,stroke:#578b68,color:#245438
+    class F closed
+    class G,J open

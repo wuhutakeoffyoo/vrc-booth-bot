@@ -1,0 +1,19 @@
+%%{init: {"markdownAutoWrap":false,"fontFamily":"Microsoft YaHei","fontSize":18,"theme":"base","themeVariables":{"fontFamily":"Noto Sans CJK SC, Microsoft YaHei, sans-serif","fontSize":"18px","primaryColor":"#e8f1ff","primaryBorderColor":"#527db3","primaryTextColor":"#17324d","lineColor":"#7890a5","secondaryColor":"#eff8f2","tertiaryColor":"#fff6e6"},"flowchart":{"curve":"basis","wrappingWidth":400,"nodeSpacing":35,"rankSpacing":45}}}%%
+flowchart TD
+    A["用户自行选择服务商"] --> B["AI key + AI URL"]
+    A --> C["搜索 key + 搜索 URL"]
+    B --> D["AI 协议适配层"]
+    D --> E["OpenAI 兼容<br/>Anthropic<br/>Gemini"]
+    E --> F["文字规划<br/>原文证据评估"]
+    E --> G["图片能力检测<br/>验证通过才开放"]
+    C --> H["搜索协议适配层"]
+    H --> I["通用 JSON<br/>Exa · Tavily<br/>Brave · SearXNG"]
+    H --> J["自定义适配器<br/>请求构造 + 结果解析"]
+    I --> K["严格校验 BOOTH 商品链接"]
+    J --> K
+    K --> L["获取商品详情<br/>与站内候选合并"]
+    F --> M["统一搜索结果"]
+    L --> M
+    G --> M
+    classDef adapter fill:#eff8f2,stroke:#59856a,color:#245438
+    class D,H adapter

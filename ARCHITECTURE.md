@@ -4,11 +4,12 @@
 
 ## 2026-10-02 通用接入与图片能力约定
 
-- 当前配套版本 booth-cli 1.5.0 / Bot 0.3.0 / CACHE_VERSION 10，Bot 需要 CLI 1.5.0+。默认 API 不绑定供应商；AI_API_KEY + AI_BASE_URL 自动发现模型，没有模型列表时提示补填 AI_MODEL；旧 VISION_* 兼容。
+- 当前配套版本 booth-cli 1.5.1 / Bot 0.3.1 / CACHE_VERSION 11，Bot 需要 CLI 1.5.0+。默认 API 不绑定供应商；AI_API_KEY + AI_BASE_URL 自动发现模型，没有模型列表时提示补填 AI_MODEL；新连接不继承旧模型名，旧 VISION_* 兼容。
 - provider_api.py 在两个仓库保持一致，适配 OpenAI Chat Completions 兼容、Anthropic Messages、Gemini generateContent；原生接口转换认证头、文本/图片请求结构与响应。不向其他服务商发送专用会话头，API 模式不自动回落本机 AI CLI。
 - 使用模型能力声明和随机合成图片探测，不能凭模型名称或 HTTP 200 判断。未配置、纯文字或能力未知时，关闭全部图片搜索入口，只允许文字搜索并提示限制；用户图片不参与能力探测。接入已验证多模态后才开放下载、识图与反向图搜。真实图片明确被拒绝时撤销缓存能力。
-- Exa 的 key 与端点独立配置，支持 Exa 原生或兼容检索协议；任意聊天 API 不自动等价为 Exa。自定义检索端点校验 HTTPS/公网 DNS，认证不重定向，只接纳真实 BOOTH 商品链接。
-- 模型/能力只在内存缓存，按端点、key 摘要、实际模型隔离；不持久化凭据、目录或测试图。完整配置、限制和 Mermaid 流程图见 [AI_SETUP.md](AI_SETUP.md)。以下 2026-10-01 记录保留对应历史版本。
+- search_api.py 在两仓保持一致；SEARCH_API_KEY / SEARCH_BASE_URL 独立配置服务，SEARCH_PROVIDER 选择通用 JSON、Exa、Tavily、Brave、SearXNG 或注册的适配器。未知域名默认 JSON，不绑定 Exa；旧 EXA_* 仅在没有新连接时有效，新端点不继承旧 key。
+- 所有检索适配器均校验 HTTPS/公网 DNS，不跟随认证重定向，响应最多 2 MB，结果只接纳真实 BOOTH 商品链接。DDG 补充可关闭；失败保留其他候选。
+- 模型/能力只在内存缓存，按端点、key 摘要、实际模型隔离；不持久化凭据、目录或测试图。完整配置、限制和图片流程图见 [AI_SETUP.md](AI_SETUP.md)，PNG/SVG 与可维护图源随仓库提交。以下 2026-10-01 记录保留对应历史版本。
 
 ## 2026-10-01 审查修复约定
 
@@ -39,23 +40,9 @@
 
 ## 1. 系统总览与运作原理
 
-```
-QQ 群/私聊
-   │  消息（/vrc search 关键词 或 关键词+图片）
-   ▼
-NapCat（QQ 协议端，云端 docker）──反向 WebSocket──▶ vrc-booth-bot（NoneBot2，腾讯云 SG）
-                                                        │  白名单/限速/查询缓存（access.py, qcache.py）
-                                                        │  subprocess：booth bot '<json>'（JSON 信封，永不抛栈）
-                                                        ▼
-                                                   booth-cli（零依赖 Python）
-                                                        │  https://*.booth.pm（搜索页/单品 JSON/商店页）
-                                                        │  booth.pximg.net（官方图床，带 Referer）
-                                                        │  www.bing.com / ascii2d（图搜引擎）
-                                                        ▼
-                                              AI 后端（通用主 API → 可选备用 API）
-                                     OpenAI 兼容 / Anthropic / Gemini；图片先验证能力
-                                     网络检索兜底：DuckDuckGo HTML ──▶ Exa API
-```
+![系统架构图](docs/images/system-architecture.png)
+
+[放大查看 SVG](docs/images/system-architecture.svg)
 
 **一次文本查询的生命周期**（`__init__.py::_handle_text`）：
 
@@ -196,22 +183,9 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
 
 以下引擎链仅在多模态能力检测通过后开放；检测在读文件、下载或向图片引擎上传前完成。
 
-```
-bing 纯 HTTP 快路径（约 2 秒，无浏览器）
-  │  multipart 上传（cbir=sbi + base64 图片）→ 302 下发 bcid →
-  │  跟随 detailV2 重定向链 → 结果页派生词（图内文字 OCR）
-  │  受限网络会被弹回首页（URL 含 FORM=SBIRDI/SBIHMP），检测到即抛错 ↓
-  ▼
-playwright 浏览器备援（有头 Chrome + 持久 profile ~/.booth-cli/pw_profile 复用通过状态，
-  --disable-blink-features=AutomationControlled；服务器用 --headless）
-  ▼  仍有结果则止步；否则
-ascii2d 备援（色合い → 特徴 两轮）
-  ▼
-派生词关键词直搜兜底：图搜无 booth 直链时，用派生词走站内搜索
-  （全派生词无果 → 剔除 CJK 只留拉丁词元再试——Bing 的 OCR 词常带括号注释）
-  ▼
-有直链时派生词关键词合并进候选池；最终排序：视觉命中前 2 → 关键词命中 → 其余视觉候选
-```
+![图片反查流程图](docs/images/reverse-search.png)
+
+[放大查看 SVG](docs/images/reverse-search.svg)
 
 关键实测结论（协议逆向自 PicImageSearch，SG 出口验证）：
 

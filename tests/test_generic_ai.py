@@ -196,6 +196,51 @@ class TestGenericBot(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await webfind.exa_find("q", "key", base_url="https://search.invalid/api"), [])
             wire.assert_not_called()
 
+    async def test_new_search_connection_never_inherits_legacy_key(self):
+        with mock.patch.object(webfind, "ddg_find", new=mock.AsyncMock()) as ddg, \
+                mock.patch.object(webfind, "api_find", new=mock.AsyncMock(return_value=[3, 3, 4])) as api_find, \
+                mock.patch.object(webfind, "exa_find", new=mock.AsyncMock()) as legacy:
+            self.assertEqual(await webfind.find_booth_item_ids("q", search_base_url="https://custom.invalid/find",
+                             exa_api_key="stale-key", ddg_enabled=False), [3, 4])
+        api_find.assert_awaited_once_with("q", "", 15, "https://custom.invalid/find", "auto")
+        legacy.assert_not_awaited()
+        ddg.assert_not_awaited()
+
+    async def test_partial_new_ai_connection_never_mixes_legacy_credentials(self):
+        old = dict(vision_api_key="old-key", vision_base_url="https://old.invalid/v1", vision_model="old-model",
+                   fallback_api_key="old-fallback", fallback_base_url="https://old-fallback.invalid/v1")
+        cfg = Config(**old, ai_base_url="https://new.invalid/v1", ai_fallback_base_url="https://new-fallback.invalid/v1")
+        self.assertEqual(cfg.vision_api_key, "")
+        self.assertEqual(cfg.vision_model, "")
+        self.assertEqual(cfg.fallback_api_key, "")
+        cfg = Config(**old, ai_api_key="new-key", ai_fallback_api_key="new-fallback")
+        self.assertEqual(cfg.vision_base_url, "")
+        self.assertEqual(cfg.fallback_base_url, "")
+
+    async def test_selected_search_api_reaches_native_get_and_filters_results(self):
+        requests = []
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(200, json={"web":{"results":[{"url":"https://booth.pm/items/5"},
+                                    {"url":"https://evilbooth.pm/items/6"}]}})
+        client = httpx.AsyncClient
+        with mock.patch.object(httpx, "AsyncClient", side_effect=lambda **kw:
+                client(transport=httpx.MockTransport(respond), **kw)), \
+                mock.patch.object(api.socket, "getaddrinfo", return_value=[(2,1,6,"",("93.184.216.34",443))]):
+            self.assertEqual(await webfind.api_find("q", "user-key", base_url="https://custom.invalid", provider="brave"), [5])
+        self.assertEqual(requests[0].method, "GET")
+        self.assertEqual(requests[0].headers["x-subscription-token"], "user-key")
+
+    async def test_search_endpoint_changes_invalidate_query_cache(self):
+        from booth_search import qcache
+        cfg = Config(search_base_url="https://custom.invalid/find", search_provider="json")
+        first = qcache.configuration_key(cfg)
+        cfg.search_provider = "tavily"
+        self.assertNotEqual(first, qcache.configuration_key(cfg))
+        cfg.search_provider = "json"
+        cfg.search_ddg_enabled = False
+        self.assertNotEqual(first, qcache.configuration_key(cfg))
+
 
 class TestGenericConfig(unittest.TestCase):
     def test_defaults_and_nonempty_alias_precedence(self):
@@ -206,7 +251,7 @@ class TestGenericConfig(unittest.TestCase):
                      vision_base_url="https://old.invalid/v1", vision_model="old-model")
         self.assertEqual(cfg.vision_api_key, "new")
         self.assertEqual(cfg.vision_base_url, "https://new.invalid/v1")
-        self.assertEqual(cfg.vision_model, "old-model")
+        self.assertEqual(cfg.vision_model, "")
         self.assertEqual(Config(ai_api_key="",vision_api_key="old").vision_api_key, "old")
 
     def test_nonebot_driver_config_loads_new_names(self):

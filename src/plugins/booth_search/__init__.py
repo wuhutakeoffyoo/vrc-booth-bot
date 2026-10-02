@@ -274,7 +274,9 @@ async def _webfind_entries(hint: str, kws: list, adult: str | None = None) -> li
     q = (kws[0] if kws else hint)
     try:
         ids = await webfind.find_booth_item_ids(
-            f"{q} Booth", exa_api_key=cfg.exa_api_key, exa_base_url=cfg.exa_base_url, timeout=15)
+            f"{q} Booth", exa_api_key=cfg.exa_api_key, exa_base_url=cfg.exa_base_url,
+            search_api_key=cfg.search_api_key, search_base_url=cfg.search_base_url,
+            search_provider=cfg.search_provider, ddg_enabled=cfg.search_ddg_enabled, timeout=15)
     except Exception as e:
         logger.warning(f"网络检索失败: {e}")
         return []
