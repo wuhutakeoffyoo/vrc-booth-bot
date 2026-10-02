@@ -100,11 +100,9 @@ AI 规划后，用固定行业词表识别复合需求中的正向术语，再�
 
 ## 架构
 
-```
-QQ → 云端 NapCat --反向WS--> 腾讯云SG: NoneBot(booth-bot) --subprocess(booth bot JSON)--> booth-cli
-                                                                        └→ booth.pm / pximg / bing（SG 直连出口）
-通用 AI（OpenAI 兼容 / Anthropic / Gemini）←— AI_API_KEY + AI_BASE_URL
-```
+![系统架构图](docs/images/system-architecture.png)
+
+[放大查看 SVG](docs/images/system-architecture.svg)
 
 系统设计详解（运作原理、三链路设计、分层兜底思路、参考的开源项目、盲测方法论）
 见 [ARCHITECTURE.md](ARCHITECTURE.md)。
