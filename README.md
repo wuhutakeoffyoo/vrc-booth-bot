@@ -107,7 +107,7 @@ AI 规划后，用固定行业词表识别复合需求中的正向术语，再�
 系统设计详解（运作原理、三链路设计、分层兜底思路、参考的开源项目、盲测方法论）
 见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-部署与代理方案（云端 NapCat + 新加坡 booth 出口）见 [PROXY_DEPLOYMENT.md](PROXY_DEPLOYMENT.md)。
+部署与代理方案（国内 VPS NapCat + 海外服务器 booth 出口）见 [PROXY_DEPLOYMENT.md](PROXY_DEPLOYMENT.md)。
 
 ## 本地运行
 
@@ -156,20 +156,20 @@ python bot.py             # 默认 0.0.0.0:8080，等 NapCat 反向 WS 接入
 
 不要用生产配额运行大规模盲测；同账号更换 key 不视为配额隔离。新检索策略或第二模型需固定样本独立评测后决定是否启用。本轮工程修复没有重新证明历史命中率。
 
-## NapCat 侧（云端）
+## NapCat 侧（国内 VPS）
 
 NapCat 的 OneBot 配置里添加反向 WS：
 
 ```json
 {
   "enable": true,
-  "urls": ["ws://<SG服务器公网IP>:8080/onebot/v11/ws"],
+  "urls": ["ws://<VPS服务器公网IP>:8080/onebot/v11/ws"],
   "messagePostFormat": "array",
   "token": "<与 ONEBOT_ACCESS_TOKEN 相同>"
 }
 ```
 
-SG 安全组放行 8080（或自定端口）；建议 NapCat 与 bot 两侧都配 token，
+VPS 安全组放行 8080（或自定端口）；建议 NapCat 与 bot 两侧都配 token，
 公网裸奔 ws 会被扫。
 
 ## 测试

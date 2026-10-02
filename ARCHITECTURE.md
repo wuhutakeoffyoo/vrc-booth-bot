@@ -187,7 +187,7 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
 
 [放大查看 SVG](docs/images/reverse-search.svg)
 
-关键实测结论（协议逆向自 PicImageSearch，SG 出口验证）：
+关键实测结论（协议逆向自 PicImageSearch，海外出口验证）：
 
 - Bing knowledge API 路线**不可行**：无 `X-Image-Knowledge-Signature` 时恒返回空壳，
   而该签名只存在于 JS 渲染页面，纯 HTTP 拿不到——所以快路径改为「重定向链取派生词」方案。
