@@ -233,6 +233,23 @@ AI_MODE=cli：仅显式启用的旧文字模式，不作为默认 API 失败后�
 - **成本与诊断**：首轮 6 搜索词 + 最多 6 件详情，二轮再加最多 3 词 + 3 件详情，总许可默认 12/18；HTTP 重试也计数。结果 metrics 提供 wire_requests 与阶段耗时，缓存命中可避免出站。
 - **取消与时限**：等待者使用 shield，单个取消不影响其他人；共享生产任务受查询总时限控制。工作线程中的 CLI 子进程使用剩余时间作为超时，并在 CLI 内检查出站截止时间。
 
+### 5.1 防风控规则总览（对外部服务的全部防御面）
+
+| 面 | 机制 | 位置 |
+|---|---|---|
+| 请求间隔 | 跨进程共享的 SQLite 准入（`BEGIN IMMEDIATE` 原子核发许可，默认 ≥1 秒；重定向/重试/详情请求同计入），子进程经 `BOOTH_REQUEST_BUDGET_DB` 共用同一库 | `request_budget.py`（CLI 侧） |
+| 429/503 冷却 | 服务端 `Retry-After` 写入共享冷却表，同机全部 CLI 进程生效；超出可等待范围直接报错而非硬闯 | `request_budget.cooldown` |
+| 每查询出站上限 | 首轮默认 12 次、二轮 18 次（`REQUEST_BUDGET`/`RETRY_REQUEST_BUDGET` 可配 6-100），配合查询总时限（`QUERY_TIMEOUT`，默认 180 秒）双保险 | bot `execution.query_scope` + `booth_client` 注入 context |
+| 缓存减负 | HTTP 内容缓存命中不消耗出站许可；bot 双层缓存（CLI 内容 + bot 查询结果）挡重复抓取 | `booth.py` + `qcache.py` |
+| 退避礼貌 | 重试遵循 `Retry-After`，无头时指数退避+抖动；UA 用浏览器标识（Cloudflare WAF 拦 python 默认 UA 的大 body POST） | `booth.py`/`vision.py` |
+| 图搜侧 | Bing 会话 Cookie 跨请求保持；风控弹回页（FORM=SBIRDI/SBIHMP）识别即回落 playwright（持久 profile + 反自动化标志），不做硬闯 | `reverse_search.py`（CLI 侧） |
+| bot 用户面 | 每用户 10s 间隔 + 每分钟 5 次；跨用户全局并发槽（默认 2）；同查询等待者不重复占槽 | `access.py`/`execution.py` |
+| AI/搜索 API | AI/搜索适配器出站与 booth 预算相互独立；AI 传输错误/5xx 有限退避重试（≤2 次），429 直接上报不硬闯 | `provider_api.py`/`vision.py` |
+| 评测隔离 | `RUN_PROFILE=benchmark` 默认禁止 AI 调用（除非显式 `BENCHMARK_ALLOW_AI=true`）；大规模评测应使用独立账号/配额 | `smart_search.py`（CLI 侧） |
+
+> 边界：限速按「一台机器」计——多机部署各自独立预算；同机部署时 bot 与 CLI 子进程经
+> `BOOTH_REQUEST_BUDGET_DB` 共享同一预算库（bot 部署清单应设置该变量）。
+
 ## 6. 参考的开源项目
 
 ### 直接借鉴（协议与机制）
