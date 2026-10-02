@@ -1,5 +1,5 @@
 """插件配置（pydantic 模型，值从 .env / 环境变量读取，仓库内不存任何凭据）。"""
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from typing import Literal
 
 
@@ -29,32 +29,42 @@ class Config(BaseModel):
         "booth.pximg.net", "booth.pm",
     ]
 
-    # AI 后端：cli=本机 opencode CLI（Go 套餐 free 模型可用）| api=OpenAI 兼容 HTTP
-    ai_mode: str = "cli"
+    # AI 后端：api=通用 HTTP（默认）；cli 仅显式启用的文字模式
+    ai_mode: str = "api"
     # cli 模式
     ai_cli_bin: str = ""               # opencode 可执行文件路径（空则从 PATH 找）
     ai_cli_model: str = "opencode/mimo-v2.6-flash-free"
     ai_cli_timeout: int = 90
-    # api 模式（OpenCode Zen Go 端点 / GLM 直连等 OpenAI 兼容端点）
-    # Go 端点: https://opencode.ai/zen/go/v1 （模型走套餐额度，需 session 头）
-    vision_api_key: str = ""
-    vision_base_url: str = "https://opencode.ai/zen/go/v1"
-    vision_model: str = "glm-5.3-flash"
+    # api 模式：OpenAI 兼容、Anthropic /messages、Gemini :generateContent
+    # key + URL 即可自动发现模型；不提供模型列表的服务需补填 AI_MODEL
+    vision_api_key: str = Field(default="", validation_alias=AliasChoices("ai_api_key", "vision_api_key"))
+    vision_base_url: str = Field(default="", validation_alias=AliasChoices("ai_base_url", "vision_base_url"))
+    vision_model: str = Field(default="", validation_alias=AliasChoices("ai_model", "vision_model"))
     vision_session_id: str = ""        # x-opencode-session 头；空则每请求自动生成
     vision_timeout: int = 60
-    # 兜底 api（主 api 失败/额度耗尽时自动切换，OpenAI 兼容格式）
-    # GLM Coding Plan: https://open.bigmodel.cn/api/coding/paas/v4
+    # 可选兜底 api（同样自动识别协议与模型）
     fallback_api_key: str = Field(default="", validation_alias=AliasChoices(
         "ai_fallback_api_key", "fallback_api_key"))
-    fallback_base_url: str = Field(default="https://open.bigmodel.cn/api/coding/paas/v4",
+    fallback_base_url: str = Field(default="",
         validation_alias=AliasChoices("ai_fallback_base_url", "fallback_base_url"))
-    fallback_model: str = Field(default="glm-5.3-flash", validation_alias=AliasChoices(
+    fallback_model: str = Field(default="", validation_alias=AliasChoices(
         "ai_fallback_model", "fallback_model"))
     # 自我纠错：利用模型 VRChat 圈知识回忆知名商品名（中文查询时追加搜索）
     recall_enabled: bool = True
     # 网络检索兜底：站内搜索无果时从 DDG/Exa 找 booth.pm 商品链接（Exa 需 key）
     websearch_fallback: bool = True
     exa_api_key: str = ""
+    exa_base_url: str = "https://api.exa.ai"
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_ai_aliases(cls, data):
+        if isinstance(data, dict):
+            data = dict(data)
+            for new, old in (("ai_api_key", "vision_api_key"), ("ai_base_url", "vision_base_url"), ("ai_model", "vision_model")):
+                if not data.get(new) and data.get(old):
+                    data[new] = data[old]
+        return data
 
     # 访问控制
     # 群白名单（空 = 不限制群；.env 示例: GROUP_WHITELIST='["111","222"]'，

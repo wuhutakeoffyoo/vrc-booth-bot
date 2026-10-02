@@ -5,8 +5,7 @@
 - 私聊：管理员始终可用；非管理员由 ALLOW_PRIVATE 决定；
 - 敏感指令 /vrc r18（R-18 专项搜索）仅管理员可用。
 
-图片流程：识图 AI 提取关键词（可配置，无 key 自动跳过）→ booth imgsearch 反查 +
-关键词搜索合并。文本流程：直接关键词搜索。
+图片流程：先验证多模态 API，再识图提词、反查与关键词合并；检测未通过只允许文字搜索。
 """
 import asyncio
 import os
@@ -15,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 import httpx
-from nonebot import get_plugin_config, logger, on_message
+from nonebot import get_driver, get_plugin_config, logger, on_message
 from nonebot.adapters.onebot.v11 import MessageEvent
 from nonebot.rule import Rule
 
@@ -124,13 +123,8 @@ def _ai_backend() -> tuple[str, str]:
             return "cli", vision.resolve_cli_bin(cfg.ai_cli_bin)
         except RuntimeError as e:
             logger.warning(f"opencode CLI 不可用: {e}")
-    if cfg.vision_api_key or cfg.fallback_api_key:
+    if (cfg.vision_api_key and cfg.vision_base_url) or (cfg.fallback_api_key and cfg.fallback_base_url):
         return "api", ""
-    if cfg.ai_mode != "cli":
-        try:
-            return "cli", vision.resolve_cli_bin(cfg.ai_cli_bin)
-        except RuntimeError:
-            pass
     return "", ""
 
 
@@ -181,66 +175,68 @@ async def _ai_recall(desc: str) -> list:
             model=cfg.vision_model, session_id=cfg.vision_session_id,
             timeout=cfg.vision_timeout)
     except Exception as e:
-        logger.warning(f"主 api 回忆失败，尝试 GLM Coding Plan: {vision.friendly_ai_error(e)}")
+        logger.warning(f"主 api 回忆失败，尝试备用 API: {vision.friendly_ai_error(e)}")
     if cfg.fallback_api_key:
         try:
             return await vision.recall_products(
                 desc, base_url=cfg.fallback_base_url, api_key=cfg.fallback_api_key,
                 model=cfg.fallback_model, timeout=cfg.vision_timeout)
         except Exception as e:
-            logger.warning(f"GLM Coding Plan 回忆失败: {vision.friendly_ai_error(e)}")
+            logger.warning(f"备用 API 回忆失败: {vision.friendly_ai_error(e)}")
     return []
 
 
-async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
+def _configured_apis():
     cfg = plugin_config
-    mode, param = _ai_backend()
-    if not mode:
-        raise BoothUnavailable("AI 未配置或 benchmark profile 未显式允许 AI")
-    if mode == "api":
+    if cfg.run_profile == "benchmark" and not cfg.benchmark_allow_ai:
+        return []
+    result = []
+    if cfg.vision_api_key and cfg.vision_base_url:
+        result.append({"base_url": cfg.vision_base_url, "api_key": cfg.vision_api_key,
+                       "model": cfg.vision_model, "session_id": cfg.vision_session_id})
+    if cfg.fallback_api_key and cfg.fallback_base_url:
+        result.append({"base_url": cfg.fallback_base_url, "api_key": cfg.fallback_api_key,
+                       "model": cfg.fallback_model})
+    return result
+
+
+async def _verified_image_backend():
+    last = {"model": "未配置", "reason": "尚未配置可验证的多模态 API"}
+    for params in _configured_apis():
         try:
-            if not cfg.vision_api_key:
-                raise BoothUnavailable("主 API 未配置")
-            image_bytes = Path(image_path).read_bytes()
-            result = await vision.extract_keywords(
-                image_bytes, hint=hint, base_url=cfg.vision_base_url,
-                api_key=cfg.vision_api_key, model=cfg.vision_model,
-                session_id=cfg.vision_session_id, timeout=cfg.vision_timeout)
-            if not result[0]:  # 空关键词（推理模型偶发空转）自动重试一次
-                logger.warning("识图关键词为空，重试一次")
-                result = await vision.extract_keywords(
-                    image_bytes, hint=hint, base_url=cfg.vision_base_url,
-                    api_key=cfg.vision_api_key, model=cfg.vision_model,
-                    session_id=cfg.vision_session_id, timeout=cfg.vision_timeout)
-            return result
-        except Exception as e:
-            logger.warning(f"主 api 失败，尝试 GLM Coding Plan 兜底: {vision.friendly_ai_error(e)}")
-        if cfg.fallback_api_key:
-            try:
-                image_bytes = Path(image_path).read_bytes()
-                result = await vision.extract_keywords(
-                    image_bytes, hint=hint, base_url=cfg.fallback_base_url,
-                    api_key=cfg.fallback_api_key, model=cfg.fallback_model,
-                    timeout=cfg.vision_timeout)
-                if not result[0]:
-                    logger.warning("兜底识图关键词为空，重试一次")
-                    result = await vision.extract_keywords(
-                        image_bytes, hint=hint, base_url=cfg.fallback_base_url,
-                        api_key=cfg.fallback_api_key, model=cfg.fallback_model,
-                        timeout=cfg.vision_timeout)
-                return result
-            except Exception as e:
-                logger.warning(f"GLM Coding Plan 兜底失败，尝试 cli: {vision.friendly_ai_error(e)}")
-        try:
-            cli_bin = vision.resolve_cli_bin(cfg.ai_cli_bin)
-        except RuntimeError as e:
-            raise BoothUnavailable(f"所有 AI 后端均不可用（主 api / 兜底 api / cli）: {e}")
-        return await vision.extract_keywords_cli(
-            image_path, hint=hint, bin_path=cli_bin,
-            model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
-    return await vision.extract_keywords_cli(
-        image_path, hint=hint, bin_path=param,
-        model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
+            result = await asyncio.to_thread(vision.provider_api.image_capability,
+                params["base_url"], params["api_key"], params["model"],
+                min(plugin_config.vision_timeout, 15))
+        except vision.provider_api.ProviderError:
+            result = {"model": params["model"] or "自动模型", "reason": "模型能力检测暂不可用"}
+        if result.get("state") == "supported":
+            return dict(params, model=result["model"])
+        last = result
+    raise BoothUnavailable(vision.provider_api.image_notice(last))
+
+
+@get_driver().on_startup
+async def check_image_capability():
+    """只使用合成测试图检测能力；不发送 QQ 消息，不读用户图片。"""
+    try:
+        params = await _verified_image_backend()
+        logger.info("多模态能力检测通过，图片入口已启用：%s" % params["model"])
+    except BoothUnavailable as exc:
+        logger.warning(str(exc))
+
+
+async def _ai_vision(image_path: str, hint: str) -> tuple[list, str]:
+    params = await _verified_image_backend()
+    try:
+        image_bytes = Path(image_path).read_bytes()
+        result = await vision.extract_keywords(image_bytes, hint=hint,
+                                               timeout=plugin_config.vision_timeout, **params)
+        if not result[0]:
+            result = await vision.extract_keywords(image_bytes, hint=hint,
+                                                   timeout=plugin_config.vision_timeout, **params)
+        return result
+    except vision.provider_api.ProviderError as exc:
+        raise BoothUnavailable(str(exc)) from None
 
 
 async def _enrich_entries(entries: list, desc_len: int = 600) -> None:
@@ -278,7 +274,7 @@ async def _webfind_entries(hint: str, kws: list, adult: str | None = None) -> li
     q = (kws[0] if kws else hint)
     try:
         ids = await webfind.find_booth_item_ids(
-            f"{q} Booth", exa_api_key=cfg.exa_api_key, timeout=15)
+            f"{q} Booth", exa_api_key=cfg.exa_api_key, exa_base_url=cfg.exa_base_url, timeout=15)
     except Exception as e:
         logger.warning(f"网络检索失败: {e}")
         return []
@@ -297,6 +293,10 @@ async def _webfind_entries(hint: str, kws: list, adult: str | None = None) -> li
 
 async def _handle_image(image_url: str, hint: str) -> dict:
     try:
+        await _verified_image_backend()
+    except BoothUnavailable as e:
+        return {"text": str(e), "entries": []}
+    try:
         image_bytes = await _download_image(image_url)
     except ImageDownloadError as e:
         return {"text": f"⚠ {e}", "entries": []}
@@ -308,7 +308,11 @@ async def _handle_image(image_url: str, hint: str) -> dict:
 async def _handle_image_bytes(image_bytes: bytes, hint: str) -> dict:
     """内部盲测入口：直接注入样本字节，不暴露消息 URL 本地读文件通道。"""
     cfg = plugin_config
-    # 1) 识图 AI 提词（AI 不可用则跳过，仅靠 CLI 自带派生词）
+    try:
+        image_backend = await _verified_image_backend()
+    except BoothUnavailable as e:
+        return {"text": str(e), "entries": []}
+    # 1) Only admit images after a verified multimodal API is connected.
     keywords, item_type = [], ""
     ai_note = ""
     mode, _ = _ai_backend()
@@ -322,7 +326,9 @@ async def _handle_image_bytes(image_bytes: bytes, hint: str) -> dict:
             logger.info(f"识图关键词: {keywords} (type={item_type})")
         except Exception as e:
             reason = vision.friendly_ai_error(e)
-            logger.warning(f"识图 AI 失败（退化为纯图搜）: {e}")
+            if isinstance(e, BoothUnavailable):
+                return {"text": str(e), "entries": []}
+            logger.warning(f"识图 AI 失败（已验证多模态，尝试图搜）: {type(e).__name__}")
             ai_note = f"⚠ AI 提词不可用：{reason}（已用图搜派生词）"
         finally:
             if tmp_for_ai:
@@ -343,7 +349,8 @@ async def _handle_image_bytes(image_bytes: bytes, hint: str) -> dict:
         data = await asyncio.to_thread(
             booth_client.imgsearch, tmp_path, headless=cfg.imgsearch_headless,
             limit=max(cfg.booth_limit, 10), cli_path=cfg.booth_cli_path,
-            timeout=cfg.imgsearch_timeout)
+            timeout=cfg.imgsearch_timeout, api_env={"AI_API_KEY": image_backend["api_key"],
+                "AI_BASE_URL": image_backend["base_url"], "AI_MODEL": image_backend["model"]})
         matches = data.get("matches") or []
         image_search_succeeded = True
         derived = (data.get("derived_query") or "").strip()
@@ -580,30 +587,26 @@ async def _ai_plan(text: str, feedback: str = "") -> tuple[list, list, bool]:
                 timeout=cfg.ai_cli_timeout, feedback=feedback)
         except Exception as e:
             logger.warning(f"CLI 方案规划失败: {vision.friendly_ai_error(e)}")
-    if cfg.vision_api_key:
+    last_error = "未配置完整的 API key 和 URL"
+    if cfg.vision_api_key and cfg.vision_base_url:
         try:
             return await vision.plan_search(
                 text, base_url=cfg.vision_base_url, api_key=cfg.vision_api_key,
                 model=cfg.vision_model, session_id=cfg.vision_session_id,
                 timeout=cfg.vision_timeout, feedback=feedback)
         except Exception as e:
+            last_error = vision.friendly_ai_error(e)
             logger.warning(f"主 api 方案规划失败: {vision.friendly_ai_error(e)}")
-    if cfg.fallback_api_key:
+    if cfg.fallback_api_key and cfg.fallback_base_url:
         try:
             return await vision.plan_search(
                 text, base_url=cfg.fallback_base_url, api_key=cfg.fallback_api_key,
                 model=cfg.fallback_model, timeout=cfg.vision_timeout,
                 feedback=feedback)
         except Exception as e:
+            last_error = vision.friendly_ai_error(e)
             logger.warning(f"兜底 api 方案规划失败: {vision.friendly_ai_error(e)}")
-    if mode != "cli":
-        try:
-            return await vision.plan_search_cli(
-                text, bin_path=vision.resolve_cli_bin(cfg.ai_cli_bin),
-                model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout, feedback=feedback)
-        except Exception:
-            pass
-    raise BoothUnavailable("方案规划不可用（主/兜底 api/cli）")
+    raise BoothUnavailable("方案规划不可用：" + last_error)
 
 
 async def _ai_evaluate(query: str, keywords: list, titles: list) -> dict:
@@ -619,30 +622,26 @@ async def _ai_evaluate(query: str, keywords: list, titles: list) -> dict:
                 timeout=cfg.ai_cli_timeout)
         except Exception as e:
             logger.warning(f"CLI 结果评估失败: {vision.friendly_ai_error(e)}")
-    if cfg.vision_api_key:
+    last_error = "未配置完整的 API key 和 URL"
+    if cfg.vision_api_key and cfg.vision_base_url:
         try:
             return await vision.evaluate_results(
                 query, keywords, titles, base_url=cfg.vision_base_url,
                 api_key=cfg.vision_api_key, model=cfg.vision_model,
                 session_id=cfg.vision_session_id, timeout=cfg.vision_timeout)
         except Exception as e:
+            last_error = vision.friendly_ai_error(e)
             logger.warning(f"主 api 结果评估失败: {vision.friendly_ai_error(e)}")
-    if cfg.fallback_api_key:
+    if cfg.fallback_api_key and cfg.fallback_base_url:
         try:
             return await vision.evaluate_results(
                 query, keywords, titles, base_url=cfg.fallback_base_url,
                 api_key=cfg.fallback_api_key, model=cfg.fallback_model,
                 timeout=cfg.vision_timeout)
         except Exception as e:
+            last_error = vision.friendly_ai_error(e)
             logger.warning(f"兜底 api 结果评估失败: {vision.friendly_ai_error(e)}")
-    if mode != "cli":
-        try:
-            return await vision.evaluate_results_cli(
-                query, keywords, titles, bin_path=vision.resolve_cli_bin(cfg.ai_cli_bin),
-                model=cfg.ai_cli_model, timeout=cfg.ai_cli_timeout)
-        except Exception:
-            pass
-    raise BoothUnavailable("结果评估不可用（主/兜底 api/cli）")
+    raise BoothUnavailable("结果评估不可用：" + last_error)
 
 
 async def _cached_plan(hint: str, adult: str | None = None):
@@ -849,6 +848,13 @@ async def _do_search(bot, event: MessageEvent):
 
     if not urls and not hint:
         await matcher.finish(USAGE)
+
+    if urls:
+        try:
+            await _verified_image_backend()
+        except BoothUnavailable as exc:
+            await matcher.finish(str(exc))
+            return
 
     # 查询缓存：相同查询（模式/页码/词）在 TTL 内直接回缓存结果，省 AI 额度
     cache_key = qcache.make_key("search", plugin_config.r18_mode, page,

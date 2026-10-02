@@ -21,7 +21,7 @@ _cli_verified: str | None = None
 
 
 def _verify_cli_supports_bot(cmd_prefix: list) -> None:
-    """校验 CLI 是 1.4.0+，支持共享请求预算。"""
+    """校验 CLI 是 1.5.0+，支持共享请求预算与图片能力闸。"""
     global _cli_verified
     exe_key = " ".join(cmd_prefix)
     if _cli_verified == exe_key:
@@ -32,9 +32,9 @@ def _verify_cli_supports_bot(cmd_prefix: list) -> None:
                               timeout=15)
         out = (proc.stdout or "").strip()
         version = out.split()[-1] if out and proc.returncode == 0 else ""
-        if not version or [int(x) for x in version.split(".")] < [1, 4, 0]:
+        if not version or [int(x) for x in version.split(".")] < [1, 5, 0]:
             raise BoothCliError(
-                f"booth CLI 版本过旧（{out or '无输出'}），共享请求预算需要 >=1.4.0。"
+                f"booth CLI 版本过旧（{out or '无输出'}），图片能力闸需要 >=1.5.0。"
                 "请更新 booth-cli 或在 BOOTH_CLI_PATH 指向新版 booth.py")
     except subprocess.TimeoutExpired as e:
         raise BoothCliError("booth CLI 版本校验超时") from e
@@ -61,7 +61,7 @@ def build_cmd(cli_path: str) -> list:
 
 
 def call_booth(action: str, params: dict | None = None,
-               cli_path: str = "", timeout: int = 60) -> dict:
+               cli_path: str = "", timeout: int = 60, api_env: dict | None = None) -> dict:
     """执行一次 booth bot 调用，返回 data 部分；失败抛 BoothCliError。"""
     exe = resolve_cli_path(cli_path)
     cmd = build_cmd(exe)
@@ -72,11 +72,12 @@ def call_booth(action: str, params: dict | None = None,
         payload["context"] = context
         timeout = min(timeout, max(1, context["deadline"] - time.time()))
     req = json.dumps(payload, ensure_ascii=False)
+    extra = {"env": dict(os.environ, **api_env)} if api_env else {}
     try:
         proc = subprocess.run(
             cmd + ["bot", req],
             capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout)
+            errors="replace", timeout=timeout, **extra)
     except subprocess.TimeoutExpired:
         raise BoothCliError(f"booth {action} 超时（>{timeout}s）")
     except OSError as e:
@@ -123,8 +124,8 @@ def item(item_id, *, no_cache: bool = False, desc_len: int | None = None,
 
 def imgsearch(image_path: str, *, headless: bool = True,
               engine: str = "bing,ascii2d", wait_s: int = 24, limit: int = 5,
-              cli_path: str = "", timeout: int = 240) -> dict:
+              cli_path: str = "", timeout: int = 240, api_env: dict | None = None) -> dict:
     return call_booth("imgsearch", {
         "image": image_path, "headless": headless, "engine": engine,
         "wait_s": wait_s, "limit": limit,
-    }, cli_path=cli_path, timeout=timeout)
+    }, cli_path=cli_path, timeout=timeout, api_env=api_env)

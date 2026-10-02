@@ -23,8 +23,9 @@ class TestParentContract(unittest.TestCase):
     def test_real_subprocess_version_envelope(self):
         data = bc.call_booth("version", cli_path=str(CLI))
         self.assertEqual(data["version"], parent.__version__)
-        self.assertGreaterEqual(tuple(map(int, data["version"].split("."))), (1, 4, 0))
+        self.assertGreaterEqual(tuple(map(int, data["version"].split("."))), (1, 5, 0))
         self.assertIn("shared_request_budget", data["capabilities"])
+        self.assertIn("verified_image_input", data["capabilities"])
         self.assertEqual(len(data["semantic_fingerprint"]), 64)
 
     def test_bot_search_flags_reach_parent_parser(self):
@@ -56,6 +57,10 @@ class TestParentContract(unittest.TestCase):
     def test_source_evidence_contract_matches_parent(self):
         self.assertEqual((CLI.parent / "search_evidence.py").read_text(encoding="utf-8"),
                          (ROOT / "src/plugins/booth_search/search_evidence.py").read_text(encoding="utf-8"))
+
+    def test_provider_contract_matches_parent(self):
+        self.assertEqual((CLI.parent / "provider_api.py").read_text(encoding="utf-8"),
+                         (ROOT / "src/plugins/booth_search/provider_api.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

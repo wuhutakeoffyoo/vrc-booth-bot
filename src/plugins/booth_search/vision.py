@@ -1,45 +1,25 @@
-"""识图 AI 客户端：双后端。
-
-- api: OpenAI 兼容 chat/completions（OpenCode Zen Go 端点 / GLM 直连等）。
-  Go 端点要求 x-opencode-session 头标识客户端会话。
-- cli: 本机 opencode CLI（`opencode run`，free 模型可用，支持 -f 附图）
-
-key 只从配置读取，本模块不落任何凭据。
-"""
+"""通用 AI 客户端。图片必须先通过 API 多模态检测；CLI 仅供显式文字模式使用。"""
 import asyncio
 import base64
-import ipaddress
 import json
 import re
 import shutil
 import subprocess
-import urllib.parse
-import uuid
 from pathlib import Path
 
 import httpx
+try:
+    from . import provider_api
+except ImportError:
+    import provider_api
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def guard_api_base(base_url: str) -> str:
-    """出站前校验 API base：仅 https 且主机非本机/私网/保留地址。"""
-    parts = urllib.parse.urlsplit(base_url)
-    host = parts.hostname or ""
-    if parts.scheme != "https" or not host:
-        raise RuntimeError(f"VISION_BASE_URL 必须是 https: {base_url}")
-    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or host.endswith((".local", ".internal")):
-        raise RuntimeError(f"VISION_BASE_URL 主机不被允许: {host}")
-    try:
-        if ipaddress.ip_address(host).is_private or ipaddress.ip_address(host).is_reserved:
-            raise RuntimeError(f"VISION_BASE_URL 指向私网/保留地址: {host}")
-    except ValueError:
-        pass  # 域名（非 IP 字面量），放行
-    return base_url
+    """拒绝私网、URL 凭据与查询参数，不回显可能含凭据的 URL。"""
+    return provider_api.guard_url(base_url)
 
-
-def _session_header(session_id: str) -> str:
-    return session_id or f"booth-bot-{uuid.uuid4().hex[:16]}"
 
 # 提词目标：VRChat 素材（模型/衣装/髪型/配件/ギミック/テクスチャ/ツール）
 _VISION_PROMPT = (
@@ -56,7 +36,12 @@ _VISION_PROMPT = (
 )
 
 
-def build_data_url(image_bytes: bytes, mime: str = "image/jpeg") -> str:
+def build_data_url(image_bytes: bytes, mime: str = "") -> str:
+    if not mime:
+        mime = ("image/png" if image_bytes.startswith(b"\x89PNG\r\n\x1a\n") else
+                "image/gif" if image_bytes.startswith((b"GIF87a", b"GIF89a")) else
+                "image/webp" if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP" else
+                "image/jpeg")
     return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
 
@@ -198,7 +183,8 @@ async def recall_products(desc: str, *, base_url: str, api_key: str,
                           timeout: int = 60) -> list:
     """利用模型的 VRChat 圈知识回忆可能的知名商品名（自我纠错层）。"""
     guard_api_base(base_url)
-    url = base_url.rstrip("/") + "/chat/completions"
+    model = await asyncio.to_thread(provider_api.resolve_model, base_url, api_key, model, min(timeout, 15))
+    url = provider_api.endpoint(base_url, model)[2]
     payload = {
         "model": model,
         "messages": [{"role": "user",
@@ -212,6 +198,10 @@ async def recall_products(desc: str, *, base_url: str, api_key: str,
 
 def friendly_ai_error(e: Exception) -> str:
     """把 AI 调用异常翻译成准确、可行动的中文反馈（给群友看的）。"""
+    if isinstance(e, provider_api.ProviderError):
+        return str(e)
+    if isinstance(e, RuntimeError) and any(word in str(e) for word in ("规划不可用", "评估不可用")):
+        return str(e)
     if isinstance(e, httpx.HTTPStatusError):
         code = e.response.status_code
         body = ""
@@ -220,29 +210,22 @@ def friendly_ai_error(e: Exception) -> str:
         except Exception:
             pass
         if code == 402 or "insufficient" in body or "no balance" in body:
-            return ("AI 额度不足：账户按量余额不够（Go 套餐仅覆盖套餐内模型）。"
-                    "请到 opencode.ai 控制台充值，或换用套餐内模型")
+            return "AI 额度不足：请检查所接入服务的余额或模型权限"
         if code == 429 or "usage limit" in body or "limit exceeded" in body:
-            if "5 hour" in body or "5h" in body or "hourly" in body:
-                return "AI 已达 Go 套餐 5 小时用量上限（$12），等窗口重置后自动恢复"
-            if "week" in body:
-                return "AI 已达 Go 套餐每周用量上限（$30），周一自动恢复"
-            if "month" in body or "monthly" in body:
-                return "AI 已达 Go 套餐每月用量上限（$60），次月自动恢复"
             return "AI 请求被限流（429）：触发用量上限或请求过频，请稍后再试"
         if code in (401,):
-            return "AI 认证失败：API key 无效或已过期，请检查 VISION_API_KEY"
+            return "AI 认证失败：API key 无效或已过期，请检查 AI_API_KEY"
         if code == 403:
             return "AI 请求被拦截（403）：key 无权限或触发安全策略，请检查账户套餐状态"
         if code >= 500:
-            return f"AI 服务端错误（HTTP {code}）：OpenCode 上游故障，请稍后再试"
+            return f"AI 服务端错误（HTTP {code}）：上游故障，请稍后再试"
         return f"AI 接口错误（HTTP {code}）"
     if isinstance(e, httpx.TimeoutException):
-        return "AI 网络超时：OpenCode 响应过慢（模型繁忙），请稍后重试"
+        return "AI 网络超时：端点响应过慢（模型繁忙），请稍后重试"
     if isinstance(e, httpx.TransportError):
-        return "AI 网络异常：无法连接 OpenCode（DNS/连接失败），检查服务器网络"
+        return "AI 网络异常：无法连接所配置端点，请检查网络"
     if isinstance(e, RuntimeError) and "Insufficient" in str(e):
-        return "AI 额度不足：账户按量余额不够（CLI 后端），请充值或换 free 模型"
+        return "AI 额度不足：请检查所接入服务的余额或模型权限"
     if isinstance(e, RuntimeError) and "超时" in str(e):
         return "AI 处理超时：模型响应太慢，请稍后重试"
     return f"AI 调用失败：{type(e).__name__}"
@@ -250,12 +233,7 @@ def friendly_ai_error(e: Exception) -> str:
 
 def _api_content(resp_json: dict) -> str:
     """取模型回复文本；推理模型可能把内容放在 reasoning_content 或超长截断。"""
-    choice = (resp_json.get("choices") or [{}])[0]
-    msg = choice.get("message") or {}
-    content = msg.get("content") or ""
-    if not content.strip():
-        content = msg.get("reasoning_content") or ""
-    return content
+    return provider_api.content(resp_json)
 
 
 async def _api_post(url: str, payload: dict, api_key: str,
@@ -263,15 +241,22 @@ async def _api_post(url: str, payload: dict, api_key: str,
                     retries: int = 2) -> str:
     """POST chat/completions，传输类错误自动重试，返回回复文本。
     UA 用浏览器标识：Cloudflare WAF 会拦数据中心 IP + python 默认 UA 的大 body POST。"""
-    headers = {"Authorization": f"Bearer {api_key}",
-               "x-opencode-session": _session_header(session_id),
-               "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) "
-                              "Chrome/126.0.0.0 Safari/537.36")}
+    if "messages" in payload:
+        model = await asyncio.to_thread(provider_api.resolve_model, url, api_key,
+                                       payload.get("model", ""), min(timeout, 15))
+        payload = dict(payload, model=model)
+    url, payload, headers = provider_api.prepare(url, payload, api_key, session_id)
+    headers["User-Agent"] = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                             "AppleWebKit/537.36 (KHTML, like Gecko) "
+                             "Chrome/126.0.0.0 Safari/537.36")
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         for attempt in range(retries + 1):
             try:
                 resp = await client.post(url, json=payload, headers=headers)
+                compatible = provider_api.compatible_retry(payload, resp.status_code, resp.text)
+                if compatible is not None and attempt < retries:
+                    payload = compatible
+                    continue
                 resp.raise_for_status()
                 return _api_content(resp.json())
             except httpx.TransportError:
@@ -285,14 +270,26 @@ async def extract_keywords(image_bytes: bytes, *, hint: str = "",
                            session_id: str = "", timeout: int = 60) -> tuple[list, str]:
     """调用识图模型，返回 (keywords, item_type)。HTTP 错误抛 httpx.HTTPStatusError。"""
     guard_api_base(base_url)
-    url = base_url.rstrip("/") + "/chat/completions"
+    capability = await asyncio.to_thread(provider_api.image_capability, base_url, api_key, model, min(timeout, 15))
+    if capability["state"] != "supported":
+        raise provider_api.ProviderError(provider_api.image_notice(capability))
+    model = capability["model"]
+    url = provider_api.endpoint(base_url, model)[2]
     payload = {
         "model": model,
         "messages": build_messages(hint, image_bytes),
         "temperature": 0.2,
         "max_tokens": 2000,
     }
-    content = await _api_post(url, payload, api_key, session_id, timeout)
+    payload.update(search_evidence.structured_options(model))
+    try:
+        content = await _api_post(url, payload, api_key, session_id, timeout)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (400, 415, 422) and any(
+                word in exc.response.text.lower() for word in ("image", "vision", "multimodal", "图片", "识图")):
+            result = provider_api.reject_image(base_url, api_key, model)
+            raise provider_api.ProviderError(provider_api.image_notice(result), image_rejected=True) from None
+        raise
     return parse_keywords(content)
 
 
@@ -506,7 +503,8 @@ async def plan_search(text: str, *, base_url: str, api_key: str, model: str,
     feedback：保守重试场景下告知第一轮教训，让模型换更精确的词。
     输出不含 JSON 时带强化指令重试一次；失败抛异常由调用方退化直搜。"""
     guard_api_base(base_url)
-    url = base_url.rstrip("/") + "/chat/completions"
+    model = await asyncio.to_thread(provider_api.resolve_model, base_url, api_key, model, min(timeout, 15))
+    url = provider_api.endpoint(base_url, model)[2]
     prompt = f"{_PLAN_PROMPT}\n用户搜索请求：{text}"
     if feedback:
         prompt += f"\n上一轮搜索经验：{feedback}\n请据此换用更精确的行业词，避免重复无效词。"
@@ -532,7 +530,8 @@ async def evaluate_results(query: str, keywords: list, titles: list, *,
                            session_id: str = "", timeout: int = 60) -> dict:
     """评估候选标题是否满足需求；verdict=retry 时 keywords 为第二轮搜索词。"""
     guard_api_base(base_url)
-    url = base_url.rstrip("/") + "/chat/completions"
+    model = await asyncio.to_thread(provider_api.resolve_model, base_url, api_key, model, min(timeout, 15))
+    url = provider_api.endpoint(base_url, model)[2]
     payload = {
         "model": model,
         "messages": [{"role": "user",
@@ -598,7 +597,8 @@ async def translate_keywords(text: str, *, base_url: str, api_key: str,
     输出不含 JSON 时带强化指令
     重试一次；HTTP/解析失败抛异常，由调用方退化。"""
     guard_api_base(base_url)
-    url = base_url.rstrip("/") + "/chat/completions"
+    model = await asyncio.to_thread(provider_api.resolve_model, base_url, api_key, model, min(timeout, 15))
+    url = provider_api.endpoint(base_url, model)[2]
     prompt = f"{_TRANSLATE_PROMPT}\n用户需求：{text}"
     for attempt in range(2):
         payload = {
@@ -694,10 +694,5 @@ async def translate_keywords_cli(text: str, *, bin_path: str, model: str,
 async def extract_keywords_cli(image_path: str, *, hint: str = "",
                                bin_path: str, model: str,
                                timeout: int = 90) -> tuple[list, str]:
-    """CLI 后端：识图提词（-f 附带图片文件）。"""
-    prompt = _VISION_PROMPT
-    if hint:
-        prompt += f"\n用户补充提示：{hint}"
-    out = await asyncio.to_thread(
-        _cli_run_sync, bin_path, ["-m", model, prompt, "-f", image_path], timeout)
-    return parse_keywords(out)
+    """CLI 无可验证的图片能力接口，保持入口关闭。"""
+    raise provider_api.ProviderError("图片功能未启用：请接入通过检测的多模态 API；CLI 仅允许文字搜索")

@@ -6,10 +6,15 @@
 仅返回 booth.pm / *.booth.pm 的商品链接与 ID。无外部依赖（httpx）。
 """
 import html
+import asyncio
 import re
 import urllib.parse
 
 import httpx
+try:
+    from . import provider_api
+except ImportError:
+    import provider_api
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36"}
@@ -65,12 +70,14 @@ async def ddg_find(keywords: str, timeout: int = 15) -> list:
         return []
 
 
-async def exa_find(keywords: str, api_key: str, timeout: int = 15) -> list:
+async def exa_find(keywords: str, api_key: str, timeout: int = 15,
+                   base_url: str = "https://api.exa.ai") -> list:
     """Exa AI 搜索（可选）：限定 booth.pm 域名，返回商品 ID 列表。"""
     try:
+        url = await asyncio.to_thread(provider_api.exa_url, base_url)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             resp = await client.post(
-                "https://api.exa.ai/search",
+                url,
                 json={"query": keywords, "numResults": 8,
                       "includeDomains": ["booth.pm"]},
                 headers={"x-api-key": api_key, "Content-Type": "application/json"})
@@ -83,11 +90,12 @@ async def exa_find(keywords: str, api_key: str, timeout: int = 15) -> list:
 
 
 async def find_booth_item_ids(keywords: str, *, exa_api_key: str = "",
+                              exa_base_url: str = "https://api.exa.ai",
                               timeout: int = 15) -> list:
     """网络检索兜底入口：DDG 优先，Exa 补充（配了 key 时），合并去重。"""
     ids = await ddg_find(keywords, timeout=timeout)
     if exa_api_key:
-        for iid in await exa_find(keywords, api_key=exa_api_key, timeout=timeout):
+        for iid in await exa_find(keywords, api_key=exa_api_key, timeout=timeout, base_url=exa_base_url):
             if iid not in ids:
                 ids.append(iid)
     return ids

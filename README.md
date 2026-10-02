@@ -15,8 +15,14 @@
   跑测→改策略→复测。图文链路一测约 50% 撞上「艺术字干扰视觉 OCR」的瓶颈，
   接入 Exa 网络搜索与 LLM 自有知识库（知名模型/热门素材回忆）后二测突破到
   **93%**（JP 95% / ZH 100%）。这些历史结果未在当前版本复测；本轮验证见下文。
-- **每一层都有退路**：AI 三级后端（Go 套餐 → GLM Coding Plan → 免费 CLI 模型）、
+- **每一层都有退路**：通用主 API → 可选备用 API，文字失败时原词检索；
   网络检索兜底（DDG/Exa）、双层缓存与双层限速，所有降级如实告知用户。
+
+## 0.3.0 更新
+
+需要 booth-cli 1.5.0+。默认通用 API，只填 `AI_API_KEY + AI_BASE_URL` 可自动发现模型；无模型列表时再补填 `AI_MODEL`。支持 OpenAI 兼容、Anthropic 与 Gemini 原生协议，旧 VISION_* 配置继续有效，API 模式失败不自动启动本机 AI CLI。Exa 也支持单独配置检索端点。
+
+启动及首次图片查询先检测多模态能力；未配置、不支持或检测暂不可用时，提示限制并关闭所有图片搜索入口，仅保留文字搜索。接入通过检测的多模态 API 后才允许识图和图片反查。配置、实现原理与能力流程图见 [AI_SETUP.md](AI_SETUP.md)。
 
 ## 0.2.0 更新
 
@@ -58,7 +64,7 @@ flowchart TD
 
 初始方案 key 不含页码，默认缓存 1800 秒，同一需求翻页可复用规划；结果 key 保留页码和成人模式，避免混用不同页面或筛选。带失败反馈的二轮重新规划不使用初始方案缓存。方案和结果各自保存 expires，写入短时方案不会按其 TTL 清理仍有效的长时结果。
 
-缓存语义包含非敏感配置摘要、固定业务源码与提示词的 SHA-256 指纹，以及母项目 CLI 的语义指纹。缓存版本现为 9；凭据值与 .env 不进入摘要，AI 后端是否可用只记录布尔值。源码指纹在进程内缓存，代码更新后必须重启 Bot；文档修改不触发业务缓存失效。
+缓存语义包含非敏感配置摘要、固定业务源码与提示词的 SHA-256 指纹，以及母项目 CLI 的语义指纹。缓存版本现为 10，包含通用接入模块与 Exa 端点；凭据值与 .env 不进入摘要，AI 后端是否可用只记录布尔值。源码指纹在进程内缓存，代码更新后必须重启 Bot；文档修改不触发业务缓存失效。
 
 实现：[qcache.py](src/plugins/booth_search/qcache.py) 的 `semantic_fingerprint`、`configuration_key`、`get / put`，以及 [__init__.py](src/plugins/booth_search/__init__.py) 的 `_cached_plan`。
 
@@ -86,6 +92,8 @@ AI 规划后，用固定行业词表识别复合需求中的正向术语，再�
 
 ### 验证记录与适用范围
 
+2026-10-02 的 0.3.0 / CLI 1.5.0 本地验证：Bot 152 项、CLI 133 项、母项目契约 5 项，共 290 项通过。覆盖纯文字/未知模型关闭全部图片入口、已验证模型的真实图片拒绝后撤销能力、三类协议自动接入、配置别名与自定义 Exa 端点；key 通过子进程环境传递，不进入参数。能力检测不代表搜品准确率复测。
+
 2026-10-01 的 0.2.0 / CLI 1.4.0 配套验收：Bot 单元测试 113 项、CLI 单元测试 103 项、母项目契约测试 4 项，共 220 项通过；两仓库 Python 3.10 / 3.12 CI 通过。任务合并、取消和流程测试见 [test_execution.py](tests/test_execution.py)，缓存迁移及独立到期时间见 [test_qcache.py](tests/test_qcache.py)，真实 CLI 子进程契约见 [parent_contract.py](integration/parent_contract.py)。
 
 线上内部“铃铛”查询单次耗时 19.9 秒，使用 12 个 BOOTH 请求，展示六件商品，其中三件有有效来源引用、三件未核实；服务启动与 OneBot 重连通过。没有人工测试 QQ 实际消息发送及客户端渲染。本地三条查询抽查含已有 HTTP 缓存，不能据此承诺冷启动耗时或整体准确率，历史 93% 记录未在这一版本重新证明。
@@ -96,7 +104,7 @@ AI 规划后，用固定行业词表识别复合需求中的正向术语，再�
 
 - `/vrc search <关键词>` → 调 booth-cli 关键词搜索（自动收窄 VRChat 圈），返回 Top 结果（名称/价格/链接/店铺/R-18 标记）；末尾数字为页码（如 `/vrc search 猫娘女仆装 2`）
 - `/vrc search` + 图片（或回复一张图片）→ 识图 AI 提取关键词 + booth-cli 反向图搜，
-  双路合并返回候选（合并转发消息，每条附商品图）
+  多模态能力检测通过后才启用，双路合并返回候选
 - 「适用于XX素体的服装」类需求：AI 同时产出标题关键词与说明文核实词，
   按商品说明（対応素体/仕様 段落）匹配后置顶，结果注明核实情况
 - 部位/用途类需求（尾巴/耳朵/ギミック 等）由 AI 转成日本圈行业词多路检索
@@ -105,21 +113,21 @@ AI 规划后，用固定行业词表识别复合需求中的正向术语，再�
 ## 架构
 
 ```
-QQ → 京东云 NapCat --反向WS--> 腾讯云SG: NoneBot(booth-bot) --subprocess(booth bot JSON)--> booth-cli
+QQ → 云端 NapCat --反向WS--> 腾讯云SG: NoneBot(booth-bot) --subprocess(booth bot JSON)--> booth-cli
                                                                         └→ booth.pm / pximg / bing（SG 直连出口）
-识图 AI（OpenAI 兼容接口，GLM-5.3-Flash 样例）←— VISION_API_KEY 配置接入
+通用 AI（OpenAI 兼容 / Anthropic / Gemini）←— AI_API_KEY + AI_BASE_URL
 ```
 
 系统设计详解（运作原理、三链路设计、分层兜底思路、参考的开源项目、盲测方法论）
 见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-部署与代理方案（京东云 NapCat + 新加坡 booth 出口）见 [PROXY_DEPLOYMENT.md](PROXY_DEPLOYMENT.md)。
+部署与代理方案（云端 NapCat + 新加坡 booth 出口）见 [PROXY_DEPLOYMENT.md](PROXY_DEPLOYMENT.md)。
 
 ## 本地运行
 
 ```bash
 pip install -e .          # 或 pip install "nonebot2[fastapi]" "nonebot-adapter-onebot" httpx
-cp .env.example .env      # 填入 ONEBOT_ACCESS_TOKEN、VISION_API_KEY 等
+cp .env.example .env      # 填入 ONEBOT_ACCESS_TOKEN、AI_API_KEY、AI_BASE_URL 等
 python bot.py             # 默认 0.0.0.0:8080，等 NapCat 反向 WS 接入
 ```
 
@@ -129,9 +137,13 @@ python bot.py             # 默认 0.0.0.0:8080，等 NapCat 反向 WS 接入
 |---|---|---|
 | `ONEBOT_ACCESS_TOKEN` | 空 | NapCat 反向 WS 的 access_token，两侧必须一致 |
 | `BOOTH_CLI_PATH` | PATH 中找 `booth` | 也可指向 booth.py 绝对路径 |
-| `VISION_API_KEY` | 空 | 识图 AI 的 API key；**留空则图片只走 CLI 图搜（无 AI 提词）** |
-| `VISION_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | OpenAI 兼容端点 |
-| `VISION_MODEL` | `glm-5.3-flash` | 模型名 |
+| `AI_MODE` | api | 默认通用 API；cli 为显式旧文字模式 |
+| `AI_API_KEY` | 空 | 通用 AI key；旧 VISION_API_KEY 兼容 |
+| `AI_BASE_URL` | 空 | HTTPS 根端点或完整调用端点；旧 VISION_BASE_URL 兼容 |
+| `AI_MODEL` | 空 | 自动发现模型；无模型列表时填写，旧 VISION_MODEL 兼容 |
+| `AI_FALLBACK_API_KEY / AI_FALLBACK_BASE_URL / AI_FALLBACK_MODEL` | 空 | 可选备用 API，模型同样可自动发现 |
+| `EXA_API_KEY` | 空 | 可选 Exa 原生或兼容检索服务 key |
+| `EXA_BASE_URL` | https://api.exa.ai | 检索根端点或完整 /search，与 AI_BASE_URL 独立 |
 | `VISION_TIMEOUT` | 60 | 识图请求超时（秒） |
 | `BOOTH_LIMIT` | 6 | 返回候选上限 |
 | `BOOTH_SORT` | `popularity` | 关键词搜索排序 |
@@ -150,17 +162,13 @@ python bot.py             # 默认 0.0.0.0:8080，等 NapCat 反向 WS 接入
 | `USER_RATE_LIMIT` | 5 | 同一用户每分钟搜索次数上限 |
 | `GLOBAL_CONCURRENCY` | 2 | 全局并发上限：同时处理的查询数（跨用户共享，防多用户并发打爆 booth.pm/AI 配额，满员告知稍后再试） |
 
-**识图 AI 说明**：任何 OpenAI 兼容的多模态 chat 接口均可。样例预设 GLM
-（`https://open.bigmodel.cn/api/paas/v4` + `glm-5.3-flash`）。若换 DeepSeek：
-`VISION_BASE_URL=https://api.deepseek.com`、`VISION_MODEL` 按需填写——注意 DeepSeek
-官方模型历史上面向纯文本，**若无视觉能力，图片消息将退化为仅 CLI 图搜**（不报错），
-文本搜索不受影响。
+**图片限制**：不能凭服务商或模型名字猜测视觉能力。只上传随机合成测试图验证；未通过时提示模型限制，关闭 QQ 图片、回复图片、内部字节及 CLI 图片入口，不下载或反查用户图片。文字 AI、站内文字检索和 Exa 继续可用。更换模型/端点/key 或重启后重新检测，详见 [AI_SETUP.md](AI_SETUP.md)。
 
 凭据只从环境变量/.env 读取，本仓库不存任何 key。
 
 不要用生产配额运行大规模盲测；同账号更换 key 不视为配额隔离。新检索策略或第二模型需固定样本独立评测后决定是否启用。本轮工程修复没有重新证明历史命中率。
 
-## NapCat 侧（京东云）
+## NapCat 侧（云端）
 
 NapCat 的 OneBot 配置里添加反向 WS：
 

@@ -76,6 +76,8 @@ class TestConfigAndPolicy(unittest.TestCase):
 class TestBotFlows(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cfg = Config(ai_mode="api", vision_api_key="", fallback_api_key="",
+                          vision_base_url="https://api.invalid/v1", vision_model="review-model",
+                          fallback_base_url="https://fallback.invalid/v1",
                           recall_enabled=False, websearch_fallback=False, plan_cache_ttl=0)
         patches = [
             mock.patch.object(bs, "plugin_config", self.cfg),
@@ -102,13 +104,21 @@ class TestBotFlows(unittest.IsolatedAsyncioTestCase):
         with operation(slow):
             await asyncio.gather(self.run_flow(), heartbeat())
 
+    def admit_image_fixture(self):
+        patch = mock.patch.object(bs, "_verified_image_backend", new=mock.AsyncMock(
+            return_value={"base_url":"https://api.invalid/v1", "api_key":"placeholder", "model":"m"}))
+        patch.start()
+        self.addCleanup(patch.stop)
+
     async def test_image_cli_does_not_block_event_loop(self):
+        self.admit_image_fixture()
         self.run_flow = lambda: bs._handle_image_bytes(b"fixture", "")
         await self._nonblocking(
             lambda slow: mock.patch.object(bc, "imgsearch", side_effect=slow),
             lambda: {"matches": [entry()]})
 
     async def test_image_keyword_cli_does_not_block_event_loop(self):
+        self.admit_image_fixture()
         self.run_flow = lambda: bs._handle_image_bytes(b"fixture", "")
         with mock.patch.object(bc, "imgsearch", return_value={"derived_query": "衣装"}):
             await self._nonblocking(
@@ -122,6 +132,7 @@ class TestBotFlows(unittest.IsolatedAsyncioTestCase):
             await self._nonblocking(lambda slow: mock.patch.object(bc, "item", side_effect=slow), entry)
 
     async def test_image_results_are_filtered(self):
+        self.admit_image_fixture()
         self.cfg.r18_mode = "exclude"
         with mock.patch.object(bc, "imgsearch", return_value={
                 "matches": [entry(True, ["Illustration"])]}):
@@ -216,7 +227,7 @@ class TestBotFlows(unittest.IsolatedAsyncioTestCase):
             await bs._do_search(SimpleNamespace(), event)
             self.assertEqual(search.await_count, 1)
             for name, value in (("booth_sort", "new"), ("vrc_tag", ""), ("booth_limit", 1),
-                                ("vision_base_url", "https://api.invalid/v1")):
+                                ("vision_base_url", "https://other.invalid/v1")):
                 setattr(self.cfg, name, value)
                 await bs._do_search(SimpleNamespace(), event)
             self.assertEqual(search.await_count, 5)
@@ -233,6 +244,7 @@ class TestBotFlows(unittest.IsolatedAsyncioTestCase):
         self.assertIn("没搜到", result["text"])
 
     async def test_image_backend_failure_is_not_no_matches(self):
+        self.admit_image_fixture()
         with mock.patch.object(bc, "imgsearch", side_effect=bc.BoothCliError("HTTP 503")):
             result = await bs._handle_image_bytes(b"fixture", "")
         self.assertIn("搜索服务暂不可用", result["text"])
@@ -278,7 +290,9 @@ class TestBotFlows(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(302, headers={"Location": "https://evil.invalid/collect"})
         client = httpx.AsyncClient
         with mock.patch.object(httpx, "AsyncClient", side_effect=lambda **kw:
-                client(transport=httpx.MockTransport(respond), **kw)):
+                client(transport=httpx.MockTransport(respond), **kw)), \
+                mock.patch.object(vision.provider_api.socket, "getaddrinfo",
+                    return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
             with self.assertRaises(httpx.HTTPStatusError):
                 await vision._api_post("https://api.invalid/v1/chat/completions", {}, "placeholder")
             self.assertEqual(await webfind.exa_find("衣装", "placeholder"), [])
