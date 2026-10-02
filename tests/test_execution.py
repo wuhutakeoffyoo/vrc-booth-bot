@@ -87,6 +87,7 @@ class TestSingleFlight(unittest.IsolatedAsyncioTestCase):
 class TestActiveSearch(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cfg = Config(ai_mode="api", vision_api_key="placeholder", fallback_api_key="",
+                          vision_base_url="https://api.invalid/v1", vision_model="review-model",
                           recall_enabled=False, websearch_fallback=False)
         self.cache = {}
         def put(key, value, **kwargs):

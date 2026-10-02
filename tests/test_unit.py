@@ -31,7 +31,7 @@ class TestBoothClient(unittest.TestCase):
                 raise subprocess.TimeoutExpired(cmd="x", timeout=1)
             if cmd and "--version" in cmd:
                 return subprocess.CompletedProcess(args=[], returncode=0,
-                                                   stdout="booth 1.4.0", stderr="")
+                                                   stdout="booth 1.5.0", stderr="")
             return subprocess.CompletedProcess(args=[], returncode=returncode,
                                                stdout=stdout, stderr=stderr)
         return run
@@ -213,6 +213,8 @@ class TestVision(unittest.TestCase):
         import asyncio
 
         class FakeResp:
+            status_code = 200
+            text = ""
             def raise_for_status(self):
                 pass
 
@@ -342,9 +344,9 @@ class TestVision(unittest.TestCase):
 
         cases = [
             (mk_status(402), "额度不足"),
-            (mk_status(429, "5 hour usage limit exceeded"), "5 小时"),
-            (mk_status(429, "weekly usage limit exceeded"), "每周"),
-            (mk_status(429, "monthly usage limit exceeded"), "每月"),
+            (mk_status(429, "5 hour usage limit exceeded"), "限流"),
+            (mk_status(429, "weekly usage limit exceeded"), "限流"),
+            (mk_status(429, "monthly usage limit exceeded"), "限流"),
             (mk_status(429, "rate limited"), "限流"),
             (mk_status(401), "key 无效"),
             (mk_status(403), "拦截"),

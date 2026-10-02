@@ -2,6 +2,14 @@
 
 本文面向想读懂或二次开发的贡献者，讲清三件事：**系统怎么运作**、**每一层的实现与兜底思路**、**参考/借鉴了哪些开源项目**。部署步骤见 [PROXY_DEPLOYMENT.md](PROXY_DEPLOYMENT.md)，用法见各仓 README。
 
+## 2026-10-02 通用接入与图片能力约定
+
+- 当前配套版本 booth-cli 1.5.0 / Bot 0.3.0 / CACHE_VERSION 10，Bot 需要 CLI 1.5.0+。默认 API 不绑定供应商；AI_API_KEY + AI_BASE_URL 自动发现模型，没有模型列表时提示补填 AI_MODEL；旧 VISION_* 兼容。
+- provider_api.py 在两个仓库保持一致，适配 OpenAI Chat Completions 兼容、Anthropic Messages、Gemini generateContent；原生接口转换认证头、文本/图片请求结构与响应。不向其他服务商发送专用会话头，API 模式不自动回落本机 AI CLI。
+- 使用模型能力声明和随机合成图片探测，不能凭模型名称或 HTTP 200 判断。未配置、纯文字或能力未知时，关闭全部图片搜索入口，只允许文字搜索并提示限制；用户图片不参与能力探测。接入已验证多模态后才开放下载、识图与反向图搜。真实图片明确被拒绝时撤销缓存能力。
+- Exa 的 key 与端点独立配置，支持 Exa 原生或兼容检索协议；任意聊天 API 不自动等价为 Exa。自定义检索端点校验 HTTPS/公网 DNS，认证不重定向，只接纳真实 BOOTH 商品链接。
+- 模型/能力只在内存缓存，按端点、key 摘要、实际模型隔离；不持久化凭据、目录或测试图。完整配置、限制和 Mermaid 流程图见 [AI_SETUP.md](AI_SETUP.md)。以下 2026-10-01 记录保留对应历史版本。
+
 ## 2026-10-01 审查修复约定
 
 - 引擎版本为 **booth-cli 1.4.0**，bot 版本为 **0.2.0**，查询缓存语义版本为 **9**。两个仓库独立发布，bot CI 使用固定的母项目提交验证 JSON 信封与搜索参数。
@@ -35,7 +43,7 @@
 QQ 群/私聊
    │  消息（/vrc search 关键词 或 关键词+图片）
    ▼
-NapCat（QQ 协议端，京东云 docker）──反向 WebSocket──▶ vrc-booth-bot（NoneBot2，腾讯云 SG）
+NapCat（QQ 协议端，云端 docker）──反向 WebSocket──▶ vrc-booth-bot（NoneBot2，腾讯云 SG）
                                                         │  白名单/限速/查询缓存（access.py, qcache.py）
                                                         │  subprocess：booth bot '<json>'（JSON 信封，永不抛栈）
                                                         ▼
@@ -44,8 +52,8 @@ NapCat（QQ 协议端，京东云 docker）──反向 WebSocket──▶ vrc-b
                                                         │  booth.pximg.net（官方图床，带 Referer）
                                                         │  www.bing.com / ascii2d（图搜引擎）
                                                         ▼
-                                              AI 后端（bot 侧直连，三级兜底）
-                                     OpenCode Zen Go ──▶ GLM Coding Plan ──▶ opencode CLI (mimo free)
+                                              AI 后端（通用主 API → 可选备用 API）
+                                     OpenAI 兼容 / Anthropic / Gemini；图片先验证能力
                                      网络检索兜底：DuckDuckGo HTML ──▶ Exa API
 ```
 
@@ -59,7 +67,7 @@ NapCat（QQ 协议端，京东云 docker）──反向 WebSocket──▶ vrc-b
 6. 详情与评估：最多补 6 件完整说明 → 按来源评估 → 必要时最多 3 个新词重搜、补 3 件新详情并再评估。
 7. 结果返回：按商品展示证据状态；QQ 合并转发附商品缩略图及实际翻页提示，明确拒绝时回退纯文本。
 
-**一次识图查询的生命周期**（`_handle_image`）：下载 QQ 图片（pximg 5xx 自动退避重试）→ 视觉 AI 提词（图内文字逐字转写）→ CLI 反向图搜（Bing 引擎链，见 §4.3）→ 图搜派生词并入关键词 → 空关键词时知名商品回忆兜底 → 前 3 个关键词各搜一轮合并 → 统一重排 → 补详情 → 合并转发。
+**一次识图查询的生命周期**（`_handle_image`）：模型能力探测（随机合成图）→ 不支持或未知则提示并终止图片流程；已验证多模态才下载 QQ 图片 → 视觉 AI 提词（图内文字逐字转写）→ CLI 反向图搜（Bing 引擎链，见 §4.3）→ 图搜派生词并入关键词 → 空关键词时知名商品回忆兜底 → 前 3 个关键词各搜一轮合并 → 统一重排 → 补详情 → 合并转发。
 
 ### 数据来源（非官方接口）
 
@@ -81,7 +89,7 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
 
 ## 2. booth-cli（引擎层）实现原理
 
-引擎由 booth.py、reverse_search.py、request_budget.py、search_evidence.py 组成，使用 Python 标准库；smart_search.py 的读音变体使用 pykakasi。
+引擎由 booth.py、reverse_search.py、request_budget.py、search_evidence.py、provider_api.py 组成，使用 Python 标准库；smart_search.py 的读音变体使用 pykakasi。
 
 - **解析而非抓取渲染**：Booth 搜索页是服务端渲染的，商品卡片的 data 属性就是结构化数据，
   正则提取即可，无需浏览器；单品走 `.json` 接口，比解析 HTML 更稳。
@@ -98,7 +106,7 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
   分词+读音变体直搜。实现于 `smart_search.py`（AI/检索走 urllib；pykakasi 为必装
   依赖，提供假名读音变体）。search/smart 默认收窄 VRChat 圈
   （`--no-vrc` 关闭）；popularity 排序翻页自动切新着并标注 sort_note。
-- **版本守卫**：bot 侧首次调用前校验 booth --version ≥ 1.4.0，避免旧引擎忽略请求预算；结果进程内缓存只查一次。
+- **版本守卫**：bot 侧首次调用前校验 booth --version ≥ 1.5.0，避免旧引擎绕过图片能力限制；结果进程内缓存只查一次。
 - **错误即信息**：Cloudflare 盾（"Just a moment"）检测后报「该店无法直接抓取」，
   年龄确认页误返回时报内部错误，搜索页语言不渲染时报「试试 --lang ja」——
   每个失败都告诉调用方下一步能做什么。
@@ -146,6 +154,7 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
 
 ### 3.3 识图链路（视觉 AI + 反向图搜双路合并）
 
+- 所有图片入口先验证多模态能力；未配置、不支持、检测未知均停止图片处理，只允许文字搜索，不保留纯图片反查兜底。备用多模态 API 也必须通过检测；旧 AI CLI 图片函数保持关闭。
 - **视觉 AI 提词**的提示词要求图内文字**逐字转写**（日文保持日文、严禁罗马字/意译）——
   图内文字往往就是商品名，是最高价值信号；图内无文字时按外观特征（发色/服装/配色）给词。
   推理模型偶发空转（返回空关键词）自动重试一次。
@@ -185,6 +194,8 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
 
 ### 4.3 图搜引擎链（booth-cli imgsearch）
 
+以下引擎链仅在多模态能力检测通过后开放；检测在读文件、下载或向图片引擎上传前完成。
+
 ```
 bing 纯 HTTP 快路径（约 2 秒，无浏览器）
   │  multipart 上传（cbir=sbi + base64 图片）→ 302 下发 bcid →
@@ -212,23 +223,23 @@ ascii2d 备援（色合い → 特徴 两轮）
 ### 4.4 AI 后端链（bot）
 
 ```
-主 API（OpenCode Zen Go，https://opencode.ai/zen/go/v1，需 x-opencode-session 头）
+主 API（AI_API_KEY + AI_BASE_URL，可自动发现模型）
   ↓ 失败/额度耗尽
-兜底 API（GLM Coding Plan，https://open.bigmodel.cn/api/coding/paas/v4）
+可选备用 API（AI_FALLBACK_API_KEY + AI_FALLBACK_BASE_URL）
   ↓ 失败
-opencode CLI（`opencode run`，mimo-v2.6-flash-free，零额度成本）
-  ↓ 全部失败
-BoothUnavailable → 结果里给准确原因（friendly_ai_error）
+文字原词直搜，保留未核实状态与失败提示
+
+图片：必须有至少一个已验证多模态 API，否则关闭全部图片入口
+AI_MODE=cli：仅显式启用的旧文字模式，不作为默认 API 失败后的隐式兜底
 ```
 
-- `friendly_ai_error` 把异常翻译成可行动的中文：402 额度不足、429 按 5 小时/周/月窗口
-  分别提示恢复时间、401 认证失败、403 权限/安全策略、5xx 上游故障、超时——
+- `friendly_ai_error` 把异常翻译成可行动的中文：402 额度不足、429 限流/配额、
+  401 认证失败、403 权限/安全策略、5xx 上游故障、超时；不猜测服务商的恢复时间——
   群友看到错误就知道该等还是该换词。
 - API 请求 UA 用浏览器标识：Cloudflare WAF 会拦「数据中心 IP + python 默认 UA」的大 body POST。
 - 推理模型可能把内容放在 `reasoning_content`、把思考过程混进关键词——
   `_is_reasoning_prose` 按前缀/长度/结尾特征过滤泄漏文本。
-- CLI 后端的坑：`opencode run` 的 message 参数必须在 `-f` 之前（yargs 会把后续位置参数吞进 `-f`），
-  输出需清理 ANSI 色码。
+- CLI 文字后端的输出需清理 ANSI 色码；图片必须使用可验证的 API。
 
 ### 4.5 输出与运维层（bot）
 
