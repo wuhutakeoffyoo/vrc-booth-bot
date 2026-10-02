@@ -9,12 +9,12 @@
 - **小语种翻译不裸翻**：LLM 直译日语不可靠——借鉴 E 站（E-Hentai）AI 翻译本子类
   开源实践，以术语约束与写法规范驾驭模型：单词级关键词（Booth 多词 AND 匹配脆弱）、
   专有名词片假名完整转写、部位/用途行业词、假名读音与连写变体。
-- **按商品说明文核实兼容性**：「适用于XX素体的服装」这类需求的答案写在商品说明
-  （対応素体/仕様 段落）而非标题——自动拉取详情按说明文匹配置顶，并如实标注核实结果。
-- **盲测驱动的自迭代**：每条链路盲抽 100 个 VRC 对口样本，目标准确率 ≥90%，
+- **按商品说明提供适配证据**：「适用于XX素体的服装」类需求结合商品说明
+  （対応素体/仕様 段落）排序，逐商品标注原文依据或未核实状态，实际适配仍以商品说明为准。
+- **历史盲测记录**：每条链路盲抽 100 个 VRC 对口样本，目标准确率 ≥90%，
   跑测→改策略→复测。图文链路一测约 50% 撞上「艺术字干扰视觉 OCR」的瓶颈，
   接入 Exa 网络搜索与 LLM 自有知识库（知名模型/热门素材回忆）后二测突破到
-  **93%**（JP 95% / ZH 100%）。
+  **93%**（JP 95% / ZH 100%）。这些历史结果未在当前版本复测；本轮验证见下文。
 - **每一层都有退路**：AI 三级后端（Go 套餐 → GLM Coding Plan → 免费 CLI 模型）、
   网络检索兜底（DDG/Exa）、双层缓存与双层限速，所有降级如实告知用户。
 
@@ -25,6 +25,72 @@
 评估输入包含完整标题、品类、标签、说明摘录和商品 ID；引用必须属于对应来源。结果逐商品显示相关候选、未核实或不满足要求，并附原文；来源证据不保证兼容性。原有行业词顺序和保守重试保留。
 
 翻页复用方案缓存，相同在途查询共享任务；取消一个等待者不影响其他人。缓存随固定代码/提示词与 CLI 源码指纹失效，计划/结果各自保存过期时间。部署后必须重启进程。
+
+## 创新点与实现原理
+
+本项目把面向 QQ 的异步查询与母项目的 CLI 检索能力组合起来：Bot 管理任务、用户通知和缓存，CLI 管理 BOOTH 出站请求；商品判断通过原文引用连接两层。以下均为已经实现的设计。
+
+```mermaid
+flowchart TD
+    A["QQ 命令：权限、频率与参数检查"] --> B{"结果缓存命中？"}
+    B -->|"是"| I["按用户消息事件发送结果"]
+    B -->|"否"| C["相同在途查询共享一个生产任务"]
+    C --> D["复用初始方案，或调用 AI 规划"]
+    D --> E["CLI 多词检索与有限详情"]
+    E --> F["原文证据评估"]
+    F --> G["必要时一次二轮检索与再评估"]
+    G --> H["逐商品状态、来源及成功结果缓存"]
+    H --> I
+    J["CLI 共享间隔、冷却、预算"] -.-> E
+    J -.-> G
+    K["Bot 完整任务总超时"] -.-> C
+```
+
+### 1. 相同查询共享计算，各用户保留自己的通知
+
+缓存未命中时，`SingleFlight` 按查询 key 创建一个生产任务，后续相同查询加入等待；文本结果 key 包含模式、页码、查询和配置语义，图片查询还包含图片 URL。只有生产任务占用全局并发名额，减少重复 AI 和 BOOTH 调用。
+
+每个等待者通过 `asyncio.shield` 等待共享任务，取消其中一个不会取消其他人的计算；返回结果做深拷贝，避免一个用户的处理修改另一个人的结果。进度通知各自绑定 bot 与消息事件，共享计算的同时保留各自的发送目标；生产任务有总超时，完成或失败会清理在途记录。
+
+实现：[execution.py](src/plugins/booth_search/execution.py) 的 `SingleFlight`，接入 [__init__.py](src/plugins/booth_search/__init__.py) 的 `_do_search`、`_do_r18`。这是同一 Bot 进程内的任务合并，不提供跨实例任务共享。
+
+### 2. 将“如何搜”和“这一页的结果”分别缓存
+
+初始方案 key 不含页码，默认缓存 1800 秒，同一需求翻页可复用规划；结果 key 保留页码和成人模式，避免混用不同页面或筛选。带失败反馈的二轮重新规划不使用初始方案缓存。方案和结果各自保存 expires，写入短时方案不会按其 TTL 清理仍有效的长时结果。
+
+缓存语义包含非敏感配置摘要、固定业务源码与提示词的 SHA-256 指纹，以及母项目 CLI 的语义指纹。缓存版本现为 9；凭据值与 .env 不进入摘要，AI 后端是否可用只记录布尔值。源码指纹在进程内缓存，代码更新后必须重启 Bot；文档修改不触发业务缓存失效。
+
+实现：[qcache.py](src/plugins/booth_search/qcache.py) 的 `semantic_fingerprint`、`configuration_key`、`get / put`，以及 [__init__.py](src/plugins/booth_search/__init__.py) 的 `_cached_plan`。
+
+### 3. 一次用户查询贯穿规划、CLI 和第二轮
+
+`ContextVar` 保存 query_scope，CLI 包装器把 request_id、预算和 deadline 随每次 JSON 请求传给母项目。各 CLI 子进程的 BOOTH 请求使用同一个 SQLite 预算库，默认首轮 12 次、二轮总上限 18 次，计入重试、重定向和详情，扩展上限不重置计数或截止时间。CLI 出站许可不包含 AI 请求，也不提供 AI 账号配额管理。
+
+Bot 用 `asyncio.wait_for` 约束完整文本任务，默认总时限 180 秒；不同阶段记录耗时，子进程信封的累计计数汇入 `metrics.wire_requests`。数据库不可用、服务冷却或预算耗尽会明确返回；子进程被强制终止而没有返回信封时，指标可能不完整。
+
+实现：[execution.py](src/plugins/booth_search/execution.py) 的 `query_scope / stage / observe_wire`、[booth_client.py](src/plugins/booth_search/booth_client.py) 的 `call_booth`；共享出站控制由 [booth-cli/request_budget.py](https://github.com/wuhutakeoffyoo/booth-cli/blob/main/request_budget.py) 实现。
+
+### 4. 有限获取详情，让商品判断附带可核验依据
+
+每个检索词保留同一页已有候选，默认最多 60 件；合并去重后首轮最多补六件完整详情，二轮最多补三件新商品，展示复用已取得的资料。评估看到完整标题、品类、标签、商品 ID、来源摘要及最多 900 字符的说明摘录，标题不含检索词也可保留为候选。
+
+模型必须返回属于对应商品字段的连续原文引用；带说明核实词的需求要求有可用 description 依据。明确否定阻止支持判断，缺少引用或详情时标为 unknown；不足三条有有效来源的命中不能维持整轮 ok。结果逐商品显示相关候选、未核实或评估提示不满足要求，并附原文。引用来源可验证，语义判断和实际兼容性仍需核查。
+
+实现：[search_evidence.py](src/plugins/booth_search/search_evidence.py)、[__init__.py](src/plugins/booth_search/__init__.py) 的 `_handle_text / _enrich_entries`，文本及合并转发展示分别位于 [format.py](src/plugins/booth_search/format.py) 和 [forward.py](src/plugins/booth_search/forward.py)。
+
+### 5. 让检索词、AI 输出和回退保持一致
+
+AI 规划后，用固定行业词表识别复合需求中的正向术语，再补读音变体；二轮复用相同归一过程，去掉已搜索的词，最多使用三个新词。已知 GLM 文本模型设置结构化 JSON 及相应推理参数，减少推理占满输出而没有评估 JSON 的失败；其他模型保持原有参数。AI 不可用时用原词检索，评估不可用时明确标注候选未核实。
+
+实现：[vision.py](src/plugins/booth_search/vision.py) 的 `plan_search / evaluate_results / apply_industry_synonyms`、[search_evidence.py](src/plugins/booth_search/search_evidence.py) 的 `structured_options`，以及 [__init__.py](src/plugins/booth_search/__init__.py) 的 AI 回退入口。母项目与 Bot 各自携带证据辅助模块，并通过契约测试检查一致性。
+
+### 验证记录与适用范围
+
+2026-10-01 的 0.2.0 / CLI 1.4.0 配套验收：Bot 单元测试 113 项、CLI 单元测试 103 项、母项目契约测试 4 项，共 220 项通过；两仓库 Python 3.10 / 3.12 CI 通过。任务合并、取消和流程测试见 [test_execution.py](tests/test_execution.py)，缓存迁移及独立到期时间见 [test_qcache.py](tests/test_qcache.py)，真实 CLI 子进程契约见 [parent_contract.py](integration/parent_contract.py)。
+
+线上内部“铃铛”查询单次耗时 19.9 秒，使用 12 个 BOOTH 请求，展示六件商品，其中三件有有效来源引用、三件未核实；服务启动与 OneBot 重连通过。没有人工测试 QQ 实际消息发送及客户端渲染。本地三条查询抽查含已有 HTTP 缓存，不能据此承诺冷启动耗时或整体准确率，历史 93% 记录未在这一版本重新证明。
+
+`RUN_PROFILE=benchmark` 默认禁止 AI，评测需显式允许并准备独立账号/配额；同账号更换 key 不视为配额隔离。新的检索策略或第二评审模型应先经固定样本独立评测，再决定是否默认启用。
 
 ## 功能
 
