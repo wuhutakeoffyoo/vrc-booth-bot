@@ -62,6 +62,10 @@ class TestParentContract(unittest.TestCase):
         self.assertEqual((CLI.parent / "provider_api.py").read_text(encoding="utf-8"),
                          (ROOT / "src/plugins/booth_search/provider_api.py").read_text(encoding="utf-8"))
 
+    def test_search_adapter_contract_matches_parent(self):
+        self.assertEqual((CLI.parent / "search_api.py").read_text(encoding="utf-8"),
+                         (ROOT / "src/plugins/booth_search/search_api.py").read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

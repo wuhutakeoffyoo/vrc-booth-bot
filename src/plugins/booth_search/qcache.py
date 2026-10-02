@@ -41,7 +41,7 @@ def _db():
 # 结果语义版本：前缀进缓存 key。凡影响结果内容的代码变更（策略/格式/修复）部署时
 # 必须递增，让旧缓存整体失效——否则新代码上线后 TTL 内用户拿到的仍是修复前
 # 的旧结果（2026-09-30「铃铛」事故：修复已上线，用户却命中旧缓存以为没优化）
-CACHE_VERSION = "10"
+CACHE_VERSION = "11"
 
 
 @lru_cache(maxsize=8)
@@ -51,7 +51,7 @@ def semantic_fingerprint(cli_path=""):
     base = Path(__file__).resolve().parent
     names = ("__init__.py", "config.py", "qcache.py", "booth_client.py", "execution.py",
              "vision.py", "rank.py", "format.py", "forward.py", "result_policy.py",
-             "webfind.py", "search_evidence.py", "image_download.py", "provider_api.py")
+             "webfind.py", "search_evidence.py", "image_download.py", "provider_api.py", "search_api.py")
     for name in names:
         digest.update(name.encode() + b"\0")
         path = base / name
@@ -60,7 +60,7 @@ def semantic_fingerprint(cli_path=""):
     parent = Path(resolved).resolve() if resolved else None
     if parent and parent.is_file() and parent.suffix.lower() == ".py":
         for name in ("booth.py", "smart_search.py", "reverse_search.py",
-                     "request_budget.py", "search_evidence.py", "provider_api.py"):
+                     "request_budget.py", "search_evidence.py", "provider_api.py", "search_api.py"):
             path = parent.parent / name
             digest.update(name.encode() + b"\0")
             digest.update(path.read_bytes() if path.is_file() else b"missing")
@@ -96,12 +96,14 @@ def configuration_key(cfg) -> str:
              "fallback_base_url", "ai_cli_bin", "exa_base_url")
     data = {name: getattr(cfg, name) for name in names}
     for name in ("request_budget", "retry_request_budget", "query_timeout",
-                 "search_candidate_limit", "plan_cache_ttl", "run_profile", "benchmark_allow_ai"):
+                 "search_candidate_limit", "plan_cache_ttl", "run_profile", "benchmark_allow_ai",
+                 "search_base_url", "search_provider", "search_ddg_enabled"):
         data[name] = getattr(cfg, name, None)
     data["semantic"] = semantic_fingerprint(cfg.booth_cli_path)
     data["primary_available"] = bool(cfg.vision_api_key)
     data["fallback_available"] = bool(cfg.fallback_api_key)
     data["exa_available"] = bool(cfg.exa_api_key)
+    data["search_available"] = bool(getattr(cfg, "search_api_key", ""))
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 

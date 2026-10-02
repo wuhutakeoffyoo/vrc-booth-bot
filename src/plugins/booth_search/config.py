@@ -51,8 +51,13 @@ class Config(BaseModel):
         "ai_fallback_model", "fallback_model"))
     # 自我纠错：利用模型 VRChat 圈知识回忆知名商品名（中文查询时追加搜索）
     recall_enabled: bool = True
-    # 网络检索兜底：站内搜索无果时从 DDG/Exa 找 booth.pm 商品链接（Exa 需 key）
+    # 网络检索：独立选择服务；auto 按已知域名识别，其余使用通用 JSON 协议
     websearch_fallback: bool = True
+    search_api_key: str = ""
+    search_base_url: str = ""
+    search_provider: str = "auto"
+    search_ddg_enabled: bool = True
+    # 仅兼容旧配置；新 SEARCH_BASE_URL 优先，不复用旧 key
     exa_api_key: str = ""
     exa_base_url: str = "https://api.exa.ai"
 
@@ -61,9 +66,18 @@ class Config(BaseModel):
     def legacy_ai_aliases(cls, data):
         if isinstance(data, dict):
             data = dict(data)
-            for new, old in (("ai_api_key", "vision_api_key"), ("ai_base_url", "vision_base_url"), ("ai_model", "vision_model")):
-                if not data.get(new) and data.get(old):
-                    data[new] = data[old]
+            for aliases in (
+                (("ai_api_key", "vision_api_key"), ("ai_base_url", "vision_base_url"), ("ai_model", "vision_model")),
+                (("ai_fallback_api_key", "fallback_api_key"), ("ai_fallback_base_url", "fallback_base_url"),
+                 ("ai_fallback_model", "fallback_model")),
+            ):
+                new_connection = any(str(data.get(new) or "").strip() for new, _ in aliases[:2])
+                for new, old in aliases:
+                    if new_connection:
+                        # A new endpoint/key selects a whole connection; never mix providers.
+                        data[new] = data.get(new) or ""
+                    elif not data.get(new) and data.get(old):
+                        data[new] = data[old]
         return data
 
     # 访问控制

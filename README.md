@@ -18,9 +18,9 @@
 - **每一层都有退路**：通用主 API → 可选备用 API，文字失败时原词检索；
   网络检索兜底（DDG/Exa）、双层缓存与双层限速，所有降级如实告知用户。
 
-## 0.3.0 更新
+## 0.3.1 更新
 
-需要 booth-cli 1.5.0+。默认通用 API，只填 `AI_API_KEY + AI_BASE_URL` 可自动发现模型；无模型列表时再补填 `AI_MODEL`。支持 OpenAI 兼容、Anthropic 与 Gemini 原生协议，旧 VISION_* 配置继续有效，API 模式失败不自动启动本机 AI CLI。Exa 也支持单独配置检索端点。
+需要 booth-cli 1.5.0+，当前配套 CLI 1.5.1。默认通用 API，只填 `AI_API_KEY + AI_BASE_URL` 可自动发现模型；无模型列表时补填 `AI_MODEL`。支持 OpenAI 兼容、Anthropic 与 Gemini 原生协议，旧 VISION_* 兼容，新连接不继承旧模型名。网页搜索独立用 `SEARCH_API_KEY + SEARCH_BASE_URL`，支持通用 JSON、Exa、Tavily、Brave、SearXNG 与自定义适配器，不绑定 OpenCode/GLM 或 Exa。
 
 启动及首次图片查询先检测多模态能力；未配置、不支持或检测暂不可用时，提示限制并关闭所有图片搜索入口，仅保留文字搜索。接入通过检测的多模态 API 后才允许识图和图片反查。配置、实现原理与能力流程图见 [AI_SETUP.md](AI_SETUP.md)。
 
@@ -36,21 +36,9 @@
 
 本项目把面向 QQ 的异步查询与母项目的 CLI 检索能力组合起来：Bot 管理任务、用户通知和缓存，CLI 管理 BOOTH 出站请求；商品判断通过原文引用连接两层。以下均为已经实现的设计。
 
-```mermaid
-flowchart TD
-    A["QQ 命令：权限、频率与参数检查"] --> B{"结果缓存命中？"}
-    B -->|"是"| I["按用户消息事件发送结果"]
-    B -->|"否"| C["相同在途查询共享一个生产任务"]
-    C --> D["复用初始方案，或调用 AI 规划"]
-    D --> E["CLI 多词检索与有限详情"]
-    E --> F["原文证据评估"]
-    F --> G["必要时一次二轮检索与再评估"]
-    G --> H["逐商品状态、来源及成功结果缓存"]
-    H --> I
-    J["CLI 共享间隔、冷却、预算"] -.-> E
-    J -.-> G
-    K["Bot 完整任务总超时"] -.-> C
-```
+![vrc-booth-bot 查询流程图](docs/images/search-flow.png)
+
+[放大查看 SVG](docs/images/search-flow.svg)
 
 ### 1. 相同查询共享计算，各用户保留自己的通知
 
@@ -64,7 +52,7 @@ flowchart TD
 
 初始方案 key 不含页码，默认缓存 1800 秒，同一需求翻页可复用规划；结果 key 保留页码和成人模式，避免混用不同页面或筛选。带失败反馈的二轮重新规划不使用初始方案缓存。方案和结果各自保存 expires，写入短时方案不会按其 TTL 清理仍有效的长时结果。
 
-缓存语义包含非敏感配置摘要、固定业务源码与提示词的 SHA-256 指纹，以及母项目 CLI 的语义指纹。缓存版本现为 10，包含通用接入模块与 Exa 端点；凭据值与 .env 不进入摘要，AI 后端是否可用只记录布尔值。源码指纹在进程内缓存，代码更新后必须重启 Bot；文档修改不触发业务缓存失效。
+缓存语义包含非敏感配置摘要、固定业务源码与提示词的 SHA-256 指纹，以及母项目 CLI 的语义指纹。缓存版本现为 11，包含 AI 与搜索适配模块、搜索端点、协议与 DDG 开关；凭据值与 .env 不进入摘要，后端 key 是否可用只记录布尔值。源码指纹在进程内缓存，代码更新后必须重启 Bot；文档修改不触发业务缓存失效。
 
 实现：[qcache.py](src/plugins/booth_search/qcache.py) 的 `semantic_fingerprint`、`configuration_key`、`get / put`，以及 [__init__.py](src/plugins/booth_search/__init__.py) 的 `_cached_plan`。
 
@@ -92,7 +80,7 @@ AI 规划后，用固定行业词表识别复合需求中的正向术语，再�
 
 ### 验证记录与适用范围
 
-2026-10-02 的 0.3.0 / CLI 1.5.0 本地验证：Bot 152 项、CLI 133 项、母项目契约 5 项，共 290 项通过。覆盖纯文字/未知模型关闭全部图片入口、已验证模型的真实图片拒绝后撤销能力、三类协议自动接入、配置别名与自定义 Exa 端点；key 通过子进程环境传递，不进入参数。能力检测不代表搜品准确率复测。
+2026-10-02 的 0.3.1 / CLI 1.5.1 本地验证：Bot 169 项、CLI 149 项、母项目契约 6 项，共 324 项通过。覆盖全部图片入口关闭、真实图片拒绝后撤销能力、三类 AI 协议、搜索协议与自定义适配器、配置迁移、旧 key 隔离和搜索缓存失效；key 通过子进程环境传递，不进入参数。能力检测不代表搜品准确率复测。
 
 2026-10-01 的 0.2.0 / CLI 1.4.0 配套验收：Bot 单元测试 113 项、CLI 单元测试 103 项、母项目契约测试 4 项，共 220 项通过；两仓库 Python 3.10 / 3.12 CI 通过。任务合并、取消和流程测试见 [test_execution.py](tests/test_execution.py)，缓存迁移及独立到期时间见 [test_qcache.py](tests/test_qcache.py)，真实 CLI 子进程契约见 [parent_contract.py](integration/parent_contract.py)。
 
@@ -142,8 +130,10 @@ python bot.py             # 默认 0.0.0.0:8080，等 NapCat 反向 WS 接入
 | `AI_BASE_URL` | 空 | HTTPS 根端点或完整调用端点；旧 VISION_BASE_URL 兼容 |
 | `AI_MODEL` | 空 | 自动发现模型；无模型列表时填写，旧 VISION_MODEL 兼容 |
 | `AI_FALLBACK_API_KEY / AI_FALLBACK_BASE_URL / AI_FALLBACK_MODEL` | 空 | 可选备用 API，模型同样可自动发现 |
-| `EXA_API_KEY` | 空 | 可选 Exa 原生或兼容检索服务 key |
-| `EXA_BASE_URL` | https://api.exa.ai | 检索根端点或完整 /search，与 AI_BASE_URL 独立 |
+| `SEARCH_API_KEY / SEARCH_BASE_URL` | 空 | 用户选择的搜索服务，独立于 AI 配置 |
+| `SEARCH_PROVIDER` | auto | json/exa/tavily/brave/searxng 或注册的适配器 |
+| `SEARCH_DDG_ENABLED` | true | 是否保留免 key 的 DDG 补充 |
+| `EXA_API_KEY / EXA_BASE_URL` | 空 / 原 Exa 端点 | 仅兼容旧配置；新搜索 URL 优先 |
 | `VISION_TIMEOUT` | 60 | 识图请求超时（秒） |
 | `BOOTH_LIMIT` | 6 | 返回候选上限 |
 | `BOOTH_SORT` | `popularity` | 关键词搜索排序 |

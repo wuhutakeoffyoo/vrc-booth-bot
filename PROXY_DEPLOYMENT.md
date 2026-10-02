@@ -41,10 +41,9 @@
 | booth 出口 | 腾讯云（新加坡） | 运行 booth-cli / booth-bot（NoneBot），booth.pm、pximg、Bing 全部从新加坡直连 |
 | 连接 | NapCat → NoneBot | NapCat 主动反向 WS 连到新加坡的 NoneBot（`ws://<SG>:<port>/onebot/v11/ws`），无需公网入站到云端 |
 
-```
-QQ 消息 → 云端 NapCat --反向WS(带 access_token)--> 腾讯云SG NoneBot(booth-bot)
-                                                        └→ booth.pm / booth.pximg.net / bing（SG 直连出口）
-```
+![云端部署与系统架构图](docs/images/system-architecture.png)
+
+[放大查看 SVG](docs/images/system-architecture.svg)
 
 ## 部署实录（2026-09-27 晚，SG 已完成）
 
