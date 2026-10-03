@@ -21,7 +21,7 @@ _cli_verified: str | None = None
 
 
 def _verify_cli_supports_bot(cmd_prefix: list) -> None:
-    """校验 CLI 是 1.5.0+，支持共享请求预算与图片能力闸。"""
+    """校验 CLI 是 1.6.0+，支持 caller 工作流与显式 AI 委托。"""
     global _cli_verified
     exe_key = " ".join(cmd_prefix)
     if _cli_verified == exe_key:
@@ -32,9 +32,9 @@ def _verify_cli_supports_bot(cmd_prefix: list) -> None:
                               timeout=15)
         out = (proc.stdout or "").strip()
         version = out.split()[-1] if out and proc.returncode == 0 else ""
-        if not version or [int(x) for x in version.split(".")] < [1, 5, 0]:
+        if not version or [int(x) for x in version.split(".")] < [1, 6, 0]:
             raise BoothCliError(
-                f"booth CLI 版本过旧（{out or '无输出'}），图片能力闸需要 >=1.5.0。"
+                f"booth CLI 版本过旧（{out or '无输出'}），caller 工作流需要 >=1.6.0。"
                 "请更新 booth-cli 或在 BOOTH_CLI_PATH 指向新版 booth.py")
     except subprocess.TimeoutExpired as e:
         raise BoothCliError("booth CLI 版本校验超时") from e
@@ -124,8 +124,23 @@ def item(item_id, *, no_cache: bool = False, desc_len: int | None = None,
 
 def imgsearch(image_path: str, *, headless: bool = True,
               engine: str = "bing,ascii2d", wait_s: int = 24, limit: int = 5,
+              delegate_ai: bool = False,
               cli_path: str = "", timeout: int = 240, api_env: dict | None = None) -> dict:
     return call_booth("imgsearch", {
         "image": image_path, "headless": headless, "engine": engine,
-        "wait_s": wait_s, "limit": limit,
+        "wait_s": wait_s, "limit": limit, "delegate_ai": delegate_ai,
     }, cli_path=cli_path, timeout=timeout, api_env=api_env)
+
+
+def workflow(query: str, *, keywords: list[str] | None = None,
+             require_terms: list[str] | None = None, limit: int = 6, desc_len: int = 3000,
+             adult: str = "include", no_vrc: bool = False,
+             cli_path: str = "", timeout: int = 180) -> dict:
+    """Source-only search for the current AI; never forwards an AI API config."""
+    params = {"query": query, "limit": limit, "desc_len": desc_len,
+              "adult": adult, "no_vrc": no_vrc}
+    if keywords is not None:
+        params["keyword"] = keywords
+    if require_terms is not None:
+        params["require_term"] = require_terms
+    return call_booth("workflow", params, cli_path=cli_path, timeout=timeout)

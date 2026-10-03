@@ -2,7 +2,21 @@
 
 本文面向想读懂或二次开发的贡献者，讲清三件事：**系统怎么运作**、**每一层的实现与兜底思路**、**参考/借鉴了哪些开源项目**。部署步骤见 [PROXY_DEPLOYMENT.md](PROXY_DEPLOYMENT.md)，用法见各仓 README。
 
-## 2026-10-02 通用接入与图片能力约定
+## 2026-10-03 默认单 AI 工作流
+
+当前 booth-cli 1.6.0 / Bot 0.4.0 / CACHE_VERSION 14，Bot 需 CLI 1.6.0+。默认由调用工具的当前 AI 做规划与判断；workflow 返回来源，内部模型调用数为零。API key 存在不自动启用另一模型。机器接入用 schema + stdin JSON 或 workflow_client.search，详见 [WORKFLOW_INTEGRATION.md](WORKFLOW_INTEGRATION.md)。
+
+![默认单 AI 工作流](docs/images/caller-workflow.png)
+
+[放大查看 SVG](docs/images/caller-workflow.svg)
+
+workflow 的完整检索轴不再拆词/改写，最多六轴、六件全文详情；返回商品说明、规格、精确原图/缩图地址、来源摘要和缺失状态，相关性/兼容性为 unknown，由当前 AI 核查。工具不自动调用网页检索或第二轮模型，当前 AI 可调整词继续。共享 BOOTH 预算、缓存与限速仍生效。
+
+可选 smart --delegate-ai 才使用配置的 API 规划/评估，默认 smart 仅本地行业词/读音扩展。Bot 默认 AI_MODE=caller，独立 QQ 仅文字检索；显式 api/cli 保留独立 AI 服务功能。caller 不探测视觉模型，当前 AI 若无宿主多模态能力就提示限制并仅文字搜索；已支持时它自己读图提词、核查候选。独立 imgsearch 须显式 --delegate-ai 并先通过配置的多模态 API 检测。
+
+下文的模型规划、评估、重试和反查管线描述**显式委托模式**；历史验收记录保留原版本和边界，不能当作默认 caller 链路的新评测。
+
+## 2026-10-02 通用接入与图片能力约定（历史版本）
 
 - 当前配套版本 booth-cli 1.5.1 / Bot 0.3.1 / CACHE_VERSION 11，Bot 需要 CLI 1.5.0+。默认 API 不绑定供应商；AI_API_KEY + AI_BASE_URL 自动发现模型，没有模型列表时提示补填 AI_MODEL；新连接不继承旧模型名，旧 VISION_* 兼容。
 - provider_api.py 在两个仓库保持一致，适配 OpenAI Chat Completions 兼容、Anthropic Messages、Gemini generateContent；原生接口转换认证头、文本/图片请求结构与响应。不向其他服务商发送专用会话头，API 模式不自动回落本机 AI CLI。
@@ -49,7 +63,7 @@
 1. 指令解析：正则匹配 `/vrc search`，末尾独立数字（1-3 位）剥为页码。
 2. 访问控制：群白名单（白名单外静默忽略）、每用户限速（10 秒间隔、每分钟 5 次）。
 3. 查询缓存：相同查询（模式/页码/词）TTL 内直接回缓存结果，标注「可能非最新」。
-4. 方案规划：活动入口统一走 plan，由模型决定是否翻译；翻页复用方案缓存，AI 不可用时原词直搜。
+4. 方案规划：默认 caller 只做本地词扩展；显式 AI_MODE=api/cli 才由模型规划并复用翻页方案缓存。
 5. 搜索执行：多个检索词 3 路并发调 CLI → 合并去重 → 标题相关度排序；出站由共享预算串行准入。
 6. 详情与评估：最多补 6 件完整说明 → 按来源评估 → 必要时最多 3 个新词重搜、补 3 件新详情并再评估。
 7. 结果返回：按商品展示证据状态；QQ 合并转发附商品缩略图及实际翻页提示，明确拒绝时回退纯文本。
@@ -76,7 +90,7 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
 
 ## 2. booth-cli（引擎层）实现原理
 
-引擎由 booth.py、reverse_search.py、request_budget.py、search_evidence.py、provider_api.py 组成，使用 Python 标准库；smart_search.py 的读音变体使用 pykakasi。
+默认引擎为 booth.py/agent_workflow.py/workflow_client.py/request_budget.py/search_evidence.py，只用标准库；可选 smart 的读音变体使用 pykakasi，委托服务适配在 provider_api.py/search_api.py。
 
 - **解析而非抓取渲染**：Booth 搜索页是服务端渲染的，商品卡片的 data 属性就是结构化数据，
   正则提取即可，无需浏览器；单品走 `.json` 接口，比解析 HTML 更稳。
@@ -86,19 +100,19 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
   （最多 4 次，指数退避+抖动）→ gzip 解压。
 - **bot JSON 信封**（`booth bot`）：子进程进出、stdout 单行 JSON、退出码恒 0、永不抛栈。
   信封里的 snake_case 参数转成 argv 走同一条 argparse 路径——bot 与 CLI 人类用法永远行为一致。
-- **智能搜索 `booth smart`（VRC 对口，与 bot 同源策略）**：需求式描述直接走完整
+- **可选智能搜索 `booth smart --delegate-ai`（与 bot 显式 AI 模式同源）**：需求式描述走完整
   bot 侧管线——AI 关键词（单词级 + desc_keywords）→ 单词级分词 3 线程并发合并
   （出站受同机共享限速约束）→ 有上限的完整详情 → 来源证据评估/二轮搜索 →
   空结果网络检索兜底与相关度展示。AI 环境变量与 bot 同名（一份 .env 两边通用），缺省降级为
   分词+读音变体直搜。实现于 `smart_search.py`（AI/检索走 urllib；pykakasi 为必装
   依赖，提供假名读音变体）。search/smart 默认收窄 VRChat 圈
   （`--no-vrc` 关闭）；popularity 排序翻页自动切新着并标注 sort_note。
-- **版本守卫**：bot 侧首次调用前校验 booth --version ≥ 1.5.0，避免旧引擎绕过图片能力限制；结果进程内缓存只查一次。
+- **版本守卫**：bot 首次调用前校验 booth --version ≥ 1.6.0，保证 caller 和显式委托契约；进程内只查一次。
 - **错误即信息**：Cloudflare 盾（"Just a moment"）检测后报「该店无法直接抓取」，
   年龄确认页误返回时报内部错误，搜索页语言不渲染时报「试试 --lang ja」——
   每个失败都告诉调用方下一步能做什么。
 
-## 3. bot（实现侧）三链路设计
+## 3. bot 的可选 AI 模式：三链路设计
 
 ### 3.1 日文/拉丁词与归档分流
 
@@ -181,7 +195,7 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
 
 ### 4.3 图搜引擎链（booth-cli imgsearch）
 
-以下引擎链仅在多模态能力检测通过后开放；检测在读文件、下载或向图片引擎上传前完成。
+以下引擎链仅在显式 --delegate-ai 且多模态检测通过后开放；检测在读文件、下载或上传前完成。当前 AI 的原生识图检索使用 workflow，不需要该链路。
 
 ![图片反查流程图](docs/images/reverse-search.png)
 
@@ -197,7 +211,7 @@ Booth 无官方公开 API，全部数据来自页面内嵌结构：
 ### 4.4 AI 后端链（bot）
 
 ```
-主 API（AI_API_KEY + AI_BASE_URL，可自动发现模型）
+显式 AI_MODE=api 后：主 API（AI_API_KEY + AI_BASE_URL，可自动发现模型）
   ↓ 失败/额度耗尽
 可选备用 API（AI_FALLBACK_API_KEY + AI_FALLBACK_BASE_URL）
   ↓ 失败
@@ -237,18 +251,19 @@ AI_MODE=cli：仅显式启用的旧文字模式，不作为默认 API 失败后�
 
 | 面 | 机制 | 位置 |
 |---|---|---|
-| 请求间隔 | 跨进程共享的 SQLite 准入（`BEGIN IMMEDIATE` 原子核发许可，默认 ≥1 秒；重定向/重试/详情请求同计入），子进程经 `BOOTH_REQUEST_BUDGET_DB` 共用同一库 | `request_budget.py`（CLI 侧） |
+| 请求间隔 | 跨进程共享的 SQLite 准入（`BEGIN IMMEDIATE` 原子核发许可，默认 ≥1 秒；重定向/重试/详情请求同计入），子进程经 `BOOTH_REQUEST_BUDGET_DB` 共用同一库 | `request_budget.py` |
 | 429/503 冷却 | 服务端 `Retry-After` 写入共享冷却表，同机全部 CLI 进程生效；超出可等待范围直接报错而非硬闯 | `request_budget.cooldown` |
-| 每查询出站上限 | 首轮默认 12 次、二轮 18 次（`REQUEST_BUDGET`/`RETRY_REQUEST_BUDGET` 可配 6-100），配合查询总时限（`QUERY_TIMEOUT`，默认 180 秒）双保险 | bot `execution.query_scope` + `booth_client` 注入 context |
+| 每查询出站上限 | 首轮默认 12 次、二轮 18 次（可配 6-100），配合查询总时限（默认 180 秒）双保险 | bot `execution.query_scope` + `request_budget.query_context` |
 | 缓存减负 | HTTP 内容缓存命中不消耗出站许可；bot 双层缓存（CLI 内容 + bot 查询结果）挡重复抓取 | `booth.py` + `qcache.py` |
-| 退避礼貌 | 重试遵循 `Retry-After`，无头时指数退避+抖动；UA 用浏览器标识（Cloudflare WAF 拦 python 默认 UA 的大 body POST） | `booth.py`/`vision.py` |
-| 图搜侧 | Bing 会话 Cookie 跨请求保持；风控弹回页（FORM=SBIRDI/SBIHMP）识别即回落 playwright（持久 profile + 反自动化标志），不做硬闯 | `reverse_search.py`（CLI 侧） |
-| bot 用户面 | 每用户 10s 间隔 + 每分钟 5 次；跨用户全局并发槽（默认 2）；同查询等待者不重复占槽 | `access.py`/`execution.py` |
+| 退避礼貌 | 重试遵循 `Retry-After`，无头时指数退避+抖动；UA 用浏览器标识（Cloudflare WAF 拦 python 默认 UA 的大 body POST） | `booth.py`/`smart_search.py` |
+| 图搜侧 | Bing 会话 Cookie 跨请求保持；风控弹回页（FORM=SBIRDI/SBIHMP）识别即回落 playwright（持久 profile + 反自动化标志），不做硬闯 | `reverse_search.py` |
+| bot 用户面 | 每用户 10s 间隔 + 每分钟 5 次；跨用户全局并发槽（默认 2）；同查询等待者不重复占槽 | bot `access.py`/`execution.py` |
 | AI/搜索 API | AI/搜索适配器出站与 booth 预算相互独立；AI 传输错误/5xx 有限退避重试（≤2 次），429 直接上报不硬闯 | `provider_api.py`/`vision.py` |
-| 评测隔离 | `RUN_PROFILE=benchmark` 默认禁止 AI 调用（除非显式 `BENCHMARK_ALLOW_AI=true`）；大规模评测应使用独立账号/配额 | `smart_search.py`（CLI 侧） |
+| 评测隔离 | `RUN_PROFILE=benchmark` 默认禁止 AI 调用（除非显式 `BENCHMARK_ALLOW_AI=true`）；大规模评测应使用独立账号/配额 | `smart_search.py` |
 
-> 边界：限速按「一台机器」计——多机部署各自独立预算；同机部署时 bot 与 CLI 子进程经
-> `BOOTH_REQUEST_BUDGET_DB` 共享同一预算库（bot 部署清单应设置该变量）。
+> 边界：限速按「一台机器」计——多机部署各自独立预算；`BOOTH_REQUEST_BUDGET_DB` 未设置时
+> 用默认路径（同机子进程自然共享）。bot 对 CLI 的预算上限（12/18）是硬约束，超限时明确
+> 报错而非静默放宽。
 
 ## 6. 参考的开源项目
 

@@ -116,6 +116,8 @@ def _ai_backend() -> tuple[str, str]:
     """返回 (mode, resolved_param)。cli 模式返回 opencode 可执行文件路径；
     api 模式返回第二个元素无意义。AI 整体不可用时返回 ("", "")。"""
     cfg = plugin_config
+    if cfg.ai_mode == "caller":
+        return "", ""
     if cfg.run_profile == "benchmark" and not cfg.benchmark_allow_ai:
         return "", ""
     if cfg.ai_mode == "cli":
@@ -134,6 +136,8 @@ async def _ai_translate(text: str) -> tuple[list, list]:
     主 api（Go 套餐）→ 兜底 api（GLM Coding Plan）→ cli（mimo free）逐级回落。"""
     cfg = plugin_config
     mode, param = _ai_backend()
+    if not mode:
+        raise BoothUnavailable("当前为 caller 模式，请由工作流中的当前 AI 提供检索词")
     if mode == "api":
         try:
             return await vision.translate_keywords(
@@ -165,6 +169,8 @@ async def _ai_translate(text: str) -> tuple[list, list]:
 async def _ai_recall(desc: str) -> list:
     """知名商品回忆：利用模型 VRChat 圈知识产出具体商品名（api 双路，不回落 cli）。"""
     cfg = plugin_config
+    if cfg.ai_mode == "caller":
+        raise BoothUnavailable("caller 模式不调用商品回忆模型")
     if cfg.run_profile == "benchmark" and not cfg.benchmark_allow_ai:
         raise BoothUnavailable("benchmark profile 未显式允许 AI")
     try:
@@ -188,6 +194,8 @@ async def _ai_recall(desc: str) -> list:
 
 def _configured_apis():
     cfg = plugin_config
+    if cfg.ai_mode == "caller":
+        return []
     if cfg.run_profile == "benchmark" and not cfg.benchmark_allow_ai:
         return []
     result = []
@@ -201,6 +209,10 @@ def _configured_apis():
 
 
 async def _verified_image_backend():
+    if plugin_config.ai_mode == "caller":
+        raise BoothUnavailable("当前为 caller 工具模式，图片入口未启用。请使用文字搜索；"
+                               "工作流可由已支持识图的当前 AI 读图后提交检索词，"
+                               "独立 QQ 图搜需显式选择 AI_MODE=api 并通过多模态检测。")
     last = {"model": "未配置", "reason": "尚未配置可验证的多模态 API"}
     for params in _configured_apis():
         try:
@@ -218,6 +230,9 @@ async def _verified_image_backend():
 @get_driver().on_startup
 async def check_image_capability():
     """只使用合成测试图检测能力；不发送 QQ 消息，不读用户图片。"""
+    if plugin_config.ai_mode == "caller":
+        logger.info("caller 工具模式：当前 AI 负责判断，跳过额外模型与视觉探测")
+        return
     try:
         params = await _verified_image_backend()
         logger.info("多模态能力检测通过，图片入口已启用：%s" % params["model"])
@@ -350,6 +365,7 @@ async def _handle_image_bytes(image_bytes: bytes, hint: str) -> dict:
             tmp_path = tf.name
         data = await asyncio.to_thread(
             booth_client.imgsearch, tmp_path, headless=cfg.imgsearch_headless,
+            delegate_ai=True,
             limit=max(cfg.booth_limit, 10), cli_path=cfg.booth_cli_path,
             timeout=cfg.imgsearch_timeout, api_env={"AI_API_KEY": image_backend["api_key"],
                 "AI_BASE_URL": image_backend["base_url"], "AI_MODEL": image_backend["model"]})
@@ -708,10 +724,9 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
         except Exception as e:
             logger.warning(f"AI 方案规划失败（用原词检索）: {e}")
             ai_notes.append(f"⚠ AI 方案规划不可用：{vision.friendly_ai_error(e)}（已用原词检索）")
-    if kws:
-        # 行业同义词种子层：泛称直译漏掉的硬映射（墨镜→サングラス 等）
-        kws = vision.apply_industry_synonyms(hint, kws)
-        kws = vision.expand_reading_variants(kws)
+    # 本地行业词表也服务于 caller/无 AI 直搜；不会触发翻译 API。
+    kws = vision.apply_industry_synonyms(hint, kws or [hint])
+    kws = vision.expand_reading_variants(kws)
     kws = search_evidence.retrieval_terms(hint, kws, vision.INDUSTRY_SYNONYMS)
 
     merged, res = await execution.stage("search", lambda: _search_merged(kws or [hint], adult, page))
@@ -908,7 +923,7 @@ async def _do_search(bot, event: MessageEvent):
             else:
                 await matcher.send("收到图片+提示，正在反查 Booth（10-60 秒）…")
         else:
-            await matcher.send("Booth 搜索中，请稍候（智能链路含 AI 规划与评估，约 30-120 秒）…")
+            await matcher.send("Booth 搜索中，请稍候…")
         timeout = max(plugin_config.query_timeout, plugin_config.imgsearch_timeout
                       + plugin_config.vision_timeout) if urls else plugin_config.query_timeout
         result = await _result_flights.run(cache_key, produce, listener=listener, timeout=timeout)

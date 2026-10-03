@@ -1,6 +1,7 @@
 %%{init: {"markdownAutoWrap":false,"fontFamily":"Microsoft YaHei","fontSize":18,"theme":"base","themeVariables":{"fontFamily":"Noto Sans CJK SC, Microsoft YaHei, sans-serif","fontSize":"18px","primaryColor":"#e8f1ff","primaryBorderColor":"#527db3","primaryTextColor":"#17324d","lineColor":"#7890a5","secondaryColor":"#eff8f2","tertiaryColor":"#fff6e6"},"flowchart":{"curve":"basis","wrappingWidth":400,"nodeSpacing":35,"rankSpacing":45}}}%%
 flowchart TD
-    A["用户自行选择服务商"] --> B["AI key + AI URL"]
+    R["默认当前 AI + workflow<br/>无需额外 key 或搜索服务"] --> L
+    A["用户显式选择可选服务"] --> B["AI key + AI URL<br/>并启用委托"]
     A --> C["搜索 key + 搜索 URL"]
     B --> D["AI 协议适配层"]
     D --> E["OpenAI 兼容<br/>Anthropic<br/>Gemini"]
