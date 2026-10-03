@@ -474,6 +474,10 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
     limit = max(cfg.booth_limit, cfg.search_candidate_limit)
     terms, seen_t = [], set()
     for kw in kws[:6]:
+        whole = str(kw).strip()
+        if " " in whole and whole not in seen_t:
+            seen_t.add(whole)
+            terms.append(whole)
         for tok in re.split(r"[\s/、，,]+", str(kw)):
             tok = tok.strip()
             # CJK 单字是合法词（鈴/耳），仅丢弃单字节/单字母噪音
@@ -481,10 +485,7 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
                     and tok not in seen_t:
                 seen_t.add(tok)
                 terms.append(tok)
-        whole = str(kw).strip()
-        if " " in whole and whole not in seen_t:
-            seen_t.add(whole)
-            terms.append(whole)
+    terms = search_evidence.retrieval_terms(kws[0] if kws else "", terms, vision.INDUSTRY_SYNONYMS)
     merged, seen, first_res = [], set(), {}
     sem = asyncio.Semaphore(3)
 
@@ -537,7 +538,8 @@ async def _search_merged(kws: list, adult: str | None = None, page: int = 1) -> 
 async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
                             desc_kws: list, page: int, page_note: str,
                             ai_note: str = "",
-                            extra_notes: list | None = None, enrich: bool = True) -> dict:
+                            extra_notes: list | None = None, enrich: bool = True,
+                            assessed: bool = False) -> dict:
     """AI 关键词搜索的统一出口：可选描述核实重排 → 补详情 → 组装返回。
 
     desc_kws 非空时（『适用于XX素体』类需求）拉大详情池、简介扩长，
@@ -547,11 +549,8 @@ async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
     """
     cfg = plugin_config
     extra_notes = extra_notes or []
-    shown = min(len(merged), cfg.booth_limit)
     sn = res.get("sort_note") or ""
-    header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
-              if res.get("total") else f"前 {shown}:{page_note}{sn}")
-    header = f"{header}\n检索词: {' / '.join(kws[:3])}（原词「{hint}」）"
+    header = f"\n检索词: {' / '.join(kws[:3])}（原词「{hint}」）"
     if res.get("_search_failures"):
         header += "\n部分关键词请求失败，展示已取得的结果"
     for note in extra_notes:
@@ -567,9 +566,17 @@ async def _merged_zh_result(hint: str, merged: list, res: dict, kws: list,
     else:
         if enrich:
             await _enrich_entries(merged[:min(cfg.booth_limit, 6)], desc_len=-1)
-    merged = search_evidence.promote_evidence(merged)
+    merged, quality = search_evidence.select_results(merged, hint, vision.INDUSTRY_SYNONYMS,
+                                                   desc_kws, assessed=assessed, display_limit=cfg.booth_limit)
+    shown = min(len(merged), cfg.booth_limit)
+    total_header = (f"共 {res.get('total') or 0:,} 件，显示前 {shown}:{page_note}{sn}"
+                    if res.get("total") else f"前 {shown}:{page_note}{sn}")
+    header = total_header + header
+    if quality["omitted"]:
+        header += f"\n已隐藏 {quality['omitted']} 件缺乏相关证据或不满足要求的候选，结果不足时不补满"
     return {"text": format_results(merged, max_n=cfg.booth_limit, title=header),
             "entries": merged, "header": header,
+            "quality": quality,
             "notes": ([ai_note] if ai_note else []) + extra_notes,
             "page": page, "qhint": hint, "total": res.get("total"),
             "has_next": res.get("has_next")}
@@ -705,9 +712,12 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
         # 行业同义词种子层：泛称直译漏掉的硬映射（墨镜→サングラス 等）
         kws = vision.apply_industry_synonyms(hint, kws)
         kws = vision.expand_reading_variants(kws)
+    kws = search_evidence.retrieval_terms(hint, kws, vision.INDUSTRY_SYNONYMS)
 
     merged, res = await execution.stage("search", lambda: _search_merged(kws or [hint], adult, page))
-    if not merged and kws:
+    merged = search_evidence.rank_target(merged, hint, vision.INDUSTRY_SYNONYMS, desc_kws)
+    if not merged and kws and search_evidence.normalized(hint) not in {
+            search_evidence.normalized(term) for term in kws}:
         # 方案词无果，退回原词直搜（日文输入时方案词可能反而偏）
         merged, res2 = await _search_merged([hint], adult, page)
         if res2.get("_search_successes") or (res2.get("total") and not res.get("total")):
@@ -746,14 +756,14 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
                     except Exception as e2:
                         logger.warning(f"二轮重新规划失败: {e2}")
                         kws2 = []
-                previous = {str(term).casefold() for term in used_terms}
-                kws2 = [term for term in kws2 if str(term).casefold() not in previous][:3]
+                kws2 = search_evidence.retrieval_terms(hint, kws2, vision.INDUSTRY_SYNONYMS,
+                                                     previous=used_terms, limit=3)
                 if kws2:
                     merged2, res2 = await _search_merged(kws2, adult, page)
                     if merged2:
-                        seen = {it["id"] for it in merged2}
-                        merged = merged2 + [it for it in merged if it["id"] not in seen]
-                        used_terms = kws2
+                        merged = search_evidence.merge_rounds(merged, merged2, hint,
+                                                             vision.INDUSTRY_SYNONYMS, desc_kws)
+                        used_terms = list(dict.fromkeys(used_terms + kws2))
                         if res2.get("total"):
                             res = res2
                         # 阶段 3：再评估
@@ -769,7 +779,7 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
                                               "（可补充材质/颜色/用途等描述再试）")
                         except Exception as e2:
                             logger.warning(f"第二轮评估失败: {e2}")
-                            eval_note = "已完成第二轮搜索"
+                            eval_note = "第二轮相关性评估暂不可用，以下候选尚未核实"
                     else:
                         eval_note = "第二轮搜索无结果，以下保留第一轮结果"
                 else:
@@ -796,7 +806,8 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
         item.setdefault("relevance_status", "unknown")
     return await _merged_zh_result(hint, merged, res, used_terms, desc_kws,
                                    page, page_note, "; ".join(ai_notes),
-                                   extra_notes=([eval_note] if eval_note else []), enrich=False)
+                                   extra_notes=([eval_note] if eval_note else []), enrich=False,
+                                   assessed=ai_ready)
 
 
 async def _send_result(bot, event, result: dict, from_cache: bool = False):
