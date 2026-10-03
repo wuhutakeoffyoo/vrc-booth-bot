@@ -68,6 +68,16 @@ def literal_match(item, query):
     return target in name
 
 
+def identity_match(item, query):
+    """Only the complete target, optionally surrounded by bracketed metadata."""
+    target = normalized(query)
+    if not target:
+        return False
+    metadata = r"(?:\[[^\]]*\]|【[^】]*】|\([^)]*\))"
+    pattern = rf"(?:{metadata}\s*)*" + re.escape(target) + rf"(?:\s*{metadata})*"
+    return bool(re.fullmatch(pattern, normalized(item.get("name"))))
+
+
 def rank_target(entries, query, seeds=(), required_terms=()):
     anchor = literal_query(query, seeds)
 
@@ -180,7 +190,7 @@ def candidate_lines(entries, terms=()):
     return result
 
 
-def grounded_evaluation(data, entries, required_terms=()):
+def grounded_evaluation(data, entries, required_terms=(), *, target_query=""):
     """Keep only cited, available evidence. Relatedness remains a model judgement.
 
     This validates provenance and negative constraints; it does not turn literal
@@ -205,6 +215,13 @@ def grounded_evaluation(data, entries, required_terms=()):
         if field not in fields or not quote or quote not in fields[field]:
             continue
         if state == "unsupported" or (state == "related" and claim.get("relation") == "thematic"):
+            # The exact name is positive retrieval evidence, not a contradiction.
+            # Retain an unverified candidate; other fields and explicit negative
+            # statements can still establish a genuine conflict.
+            if (field == "name" and not required_terms and
+                    identity_match(item, target_query) and not NEGATIVE.search(quote)):
+                item.setdefault("relevance_status", "unknown")
+                continue
             item["relevance_status"] = "unsupported"
             item["relevance_evidence"] = {"field": field, "quote": quote[:240]}
             if claim.get("relation") == "thematic":

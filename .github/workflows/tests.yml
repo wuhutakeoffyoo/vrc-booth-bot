@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: wuhutakeoffyoo/booth-cli
-          ref: 53d3aa7377ee88f454d4435a66d6d0f6924c5815
+          ref: 9c3a8ff28f67552f9ffd21ab01aaf7d291e42043
           path: parent-cli
       - run: python -m unittest discover -s integration -p '*contract.py' -v
         env:
