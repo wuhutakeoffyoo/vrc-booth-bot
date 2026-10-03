@@ -26,7 +26,7 @@ api = vision.provider_api
 
 class TestGenericBot(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.cfg = Config(ai_api_key="test", ai_base_url="https://provider.invalid/v1",
+        self.cfg = Config(ai_mode="api", ai_api_key="test", ai_base_url="https://provider.invalid/v1",
                           ai_model="text", recall_enabled=False, websearch_fallback=False)
         patch = mock.patch.object(bs, "plugin_config", self.cfg)
         patch.start()
@@ -117,7 +117,7 @@ class TestGenericBot(unittest.IsolatedAsyncioTestCase):
         cached = api._CACHE[api._key(self.cfg.vision_base_url, "test", "vision:text")][1]
         self.assertEqual(cached["state"], "unsupported")
 
-    async def test_default_api_mode_never_starts_implicit_cli(self):
+    async def test_explicit_api_mode_never_starts_implicit_cli(self):
         with mock.patch.object(vision, "plan_search", new=mock.AsyncMock(side_effect=api.ProviderError("no model; AI_MODEL"))), \
                 mock.patch.object(vision, "resolve_cli_bin") as resolve, \
                 mock.patch.object(vision, "plan_search_cli", new=mock.AsyncMock()) as cli:
@@ -245,7 +245,7 @@ class TestGenericBot(unittest.IsolatedAsyncioTestCase):
 class TestGenericConfig(unittest.TestCase):
     def test_defaults_and_nonempty_alias_precedence(self):
         cfg = Config()
-        self.assertEqual(cfg.ai_mode, "api")
+        self.assertEqual(cfg.ai_mode, "caller")
         self.assertEqual((cfg.vision_api_key,cfg.vision_base_url,cfg.vision_model), ("","",""))
         cfg = Config(ai_api_key="new", ai_base_url="https://new.invalid/v1", vision_api_key="old",
                      vision_base_url="https://old.invalid/v1", vision_model="old-model")

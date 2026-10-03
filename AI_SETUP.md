@@ -1,10 +1,18 @@
 # 通用 AI 与网页搜索接入
 
-## 最小配置
+## 默认工作流：不需要额外 AI 配置
 
-默认 `AI_MODE=api`，不预设服务商、模型或本机 AI CLI。AI 与网页搜索分别选择服务，彼此不共享 key。Bot 从 `.env` 读取；独立 CLI 需要把同名变量导出到进程环境（不会自动读取 Bot 的 `.env`）。
+booth-cli 1.6.0 / Bot 0.4.0 默认由当前工作流中的 AI 提词、读资料与判断。workflow 只执行检索并返回来源，既不发现模型，也不调用 AI 或网页搜索 API；无需 key、Exa 或 NoneBot。接入例子和工具 schema 见 [WORKFLOW_INTEGRATION.md](WORKFLOW_INTEGRATION.md)。
+
+Bot 默认 `AI_MODE=caller`，即使环境有主/备用 key，也不调用模型或启动视觉探测。独立 QQ 命令没有外部 AI 接管时，仅提供文字检索与本地行业词扩展；复杂中文理解和图片搜索需用户显式选择独立 AI 模式。caller 不会假装有视觉能力。
+
+## 可选：委托 AI 配置
+
+CLI 显式加 smart --delegate-ai，Bot 显式选择 AI_MODE=api 后才使用以下连接。已有 .env 的 AI_MODE=api 继续表示用户选择该模式，不自动改掉。AI 和网页检索分别选服务，不共享 key。Bot 读 .env；独立 CLI 需导出进程环境变量，不自动读取 Bot 的 .env。
 
 ```dotenv
+# 独立 Bot 的显式选择；工作流集成维持 caller，无需下面的 AI 连接
+AI_MODE=api
 AI_API_KEY=你的服务商密钥
 AI_BASE_URL=https://你的接口域名/v1
 # 可省略：自动读取模型列表；列表不可用时按提示填写
@@ -18,7 +26,7 @@ SEARCH_PROVIDER=auto
 SEARCH_DDG_ENABLED=true
 ```
 
-只填写 key 和 URL 时，代码读取 `/models`：优先服务声明的默认模型，其次声明支持图片的模型，否则使用首个文本生成模型。模型列表在内存缓存 10 分钟。接口不提供模型列表或账号没有列表权限时，补填 `AI_MODEL`；也可用它固定所需模型，避免列表顺序变化。不会默认使用某家免费模型。
+启用委托后，只填写 key 和 URL 时，代码读取 /models：优先服务声明的默认模型，其次声明支持图片的模型，否则使用首个文本生成模型。模型列表缓存 10 分钟。接口不提供列表或账号没有列表权限时补填 AI_MODEL，也可用它固定模型，避免列表顺序变化。不默认使用某家免费模型。
 
 已有 `VISION_API_KEY / VISION_BASE_URL / VISION_MODEL` 继续有效；非空的新变量优先。同时填写新的 `AI_API_KEY + AI_BASE_URL` 时，省略或留空 `AI_MODEL` 就自动发现模型，不继承旧服务的 `VISION_MODEL`；需要固定模型时显式填写新的 `AI_MODEL`。备用服务可填写 `AI_FALLBACK_API_KEY / AI_FALLBACK_BASE_URL`，可选 `AI_FALLBACK_MODEL`。默认 API 模式失败时不自动启动本机 AI CLI；`AI_MODE=cli` 只供明确配置的旧文字模式使用。
 
@@ -66,7 +74,9 @@ URL 必须使用 HTTPS，不能包含密钥、用户名、密码或查询参数�
 
 ## 图片能力检测与入口限制
 
-Bot 启动及首次图片查询先检查模型能力。CLI 的 `imgsearch` 在读文件或下载图片前执行相同检测。检测使用随机生成的 4 × 2 彩色方格 PNG，要求模型按顺序返回颜色；测试图仅在内存生成，不包含用户图片。不能仅凭模型名字或请求返回 200 开放图片功能。
+默认 caller 图片能力由宿主控制：当前模型只支持文字或宿主未开放视觉时，提示限制、只用文字搜索；支持时由同一个 AI 读图提词后调用 workflow，并通过宿主图片工具核查候选，不需要另一模型探测。商品图下载/展示不等同于识图。
+
+以下是可选委托链路：Bot 在 AI_MODE=api/cli 时启动及首次图片查询检查配置的 API 能力；CLI 只有显式 imgsearch --delegate-ai 才执行检测。未选择委托时在读文件/下载前说明限制，不调用 API。检测用随机生成的 4 × 2 彩色方格 PNG，要求按顺序返回颜色，仅在内存生成，不包含用户图片；不凭名字或 HTTP 200 开放图片功能。
 
 ![图片能力检测与入口限制流程图](docs/images/image-capability.png)
 
@@ -82,4 +92,4 @@ Bot 启动及首次图片查询先检查模型能力。CLI 的 `imgsearch` 在�
 
 `RUN_PROFILE=benchmark` 默认禁止 AI，也关闭图片搜索；需独立账号/配额后显式开启 `BENCHMARK_ALLOW_AI=true`。检测通过只证明基本图片输入能力，不代表 OCR、搜品命中率或模型语义判断质量已通过评测。
 
-实现：两个项目共享 `provider_api.py / search_api.py` 契约，Bot 对应文件位于 `src/plugins/booth_search/`；图片入口由 CLI `cmd_imgsearch`、Bot `_verified_image_backend / extract_keywords` 控制。当前配套版本为 booth-cli 1.5.1 / Bot 0.3.1，Bot 最低需要 CLI 1.5.0，缓存版本 11。PNG/SVG 随仓库提交，图源保存在 [docs/diagrams](docs/diagrams/)。
+实现：两个项目共享 provider_api.py/search_api.py 契约；图片入口由 CLI cmd_imgsearch 和 Bot _verified_image_backend/extract_keywords 控制。当前配套 booth-cli 1.6.0 / Bot 0.4.0，Bot 最低需 CLI 1.6.0，缓存版本 14。默认工作流入口为 cmd_workflow/agent_workflow.py，适配器为 workflow_client.py。PNG/SVG 随仓库提交，图源保存在 [docs/diagrams](docs/diagrams/)。

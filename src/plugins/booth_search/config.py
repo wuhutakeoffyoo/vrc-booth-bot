@@ -29,8 +29,9 @@ class Config(BaseModel):
         "booth.pximg.net", "booth.pm",
     ]
 
-    # AI 后端：api=通用 HTTP（默认）；cli 仅显式启用的文字模式
-    ai_mode: str = "api"
+    # 默认工具模式：当前工作流 AI 做规划/判断；独立 QQ Bot 可显式选择 api/cli。
+    # 存在密钥不等于启用委托，caller 不探测也不调用任何模型。
+    ai_mode: Literal["caller", "api", "cli"] = "caller"
     # cli 模式
     ai_cli_bin: str = ""               # opencode 可执行文件路径（空则从 PATH 找）
     ai_cli_model: str = "opencode/mimo-v2.6-flash-free"

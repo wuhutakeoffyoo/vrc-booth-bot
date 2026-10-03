@@ -1,6 +1,10 @@
 %%{init: {"markdownAutoWrap":false,"fontFamily":"Microsoft YaHei","fontSize":18,"theme":"base","themeVariables":{"fontFamily":"Noto Sans CJK SC, Microsoft YaHei, sans-serif","fontSize":"18px","primaryColor":"#e8f1ff","primaryBorderColor":"#527db3","primaryTextColor":"#17324d","lineColor":"#7890a5","secondaryColor":"#eff8f2","tertiaryColor":"#fff6e6"},"flowchart":{"curve":"basis","wrappingWidth":400,"nodeSpacing":35,"rankSpacing":45}}}%%
 flowchart TD
-    A["用户配置 API key + URL<br/>模型名可选"] --> B["发现或固定模型"]
+    O["默认 caller<br/>不探测或调用另一模型"] --> P{"宿主已开放当前 AI<br/>多模态能力？"}
+    P -->|"已开放"| Q["当前 AI 原生读图提词<br/>workflow 只执行文字检索"]
+    P -->|"纯文字或未开放"| F
+    O -.->|"用户显式选择额外 AI"| A
+    A["委托模式 API key + URL<br/>模型名可选"] --> B["发现或固定模型"]
     B --> C{"服务明确声明<br/>只支持文字？"}
     C -->|"是"| F["关闭所有图片搜索入口<br/>提示限制，保留文字搜索"]
     C -->|"否或未声明"| D["随机合成彩图检测<br/>不使用用户图片"]

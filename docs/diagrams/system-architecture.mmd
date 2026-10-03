@@ -1,15 +1,17 @@
 %%{init: {"fontFamily":"Microsoft YaHei","fontSize":18,"theme":"base","themeVariables":{"fontFamily":"Microsoft YaHei, Noto Sans CJK SC, sans-serif","fontSize":"18px","primaryColor":"#e8f1ff","primaryBorderColor":"#527db3","primaryTextColor":"#17324d","lineColor":"#7890a5"},"flowchart":{"curve":"basis","wrappingWidth":400,"nodeSpacing":35,"rankSpacing":45}}}%%
 flowchart TD
+    W["现有 AI 工作流<br/>当前 AI 负责规划与判断"] -->|"默认：workflow JSON"| D
     A["QQ 群或私聊"] --> B["云端 NapCat<br/>收发 QQ 消息"]
     B -->|"反向 WebSocket"| C["云端 vrc-booth-bot<br/>权限 · 限速 · 查询缓存"]
     C -->|"JSON 子进程接口"| D["booth-cli<br/>请求预算与商品检索"]
-    C --> E["用户选择的 AI 服务<br/>规划 · 评估 · 图片能力检测"]
-    C --> F["用户选择的搜索 API<br/>补充商品链接"]
+    C -.->|"显式 AI_MODE=api/cli"| E["可选用户选择的 AI<br/>规划 · 评估 · 图片能力检测"]
+    C -.-> F["可选搜索 API<br/>补充商品链接"]
     D --> G["BOOTH 搜索页与商品 JSON"]
     D --> H["官方商品图床"]
-    D --> I["图片反查引擎<br/>多模态能力通过后开放"]
+    D -.-> I["可选独立图片反查<br/>显式委托且多模态检测通过"]
     E --> J["原文证据与逐商品状态"]
     F --> J
     G --> J
     J --> C
+    J -->|"商品来源交回当前 AI"| W
     C -->|"各用户事件独立通知"| A

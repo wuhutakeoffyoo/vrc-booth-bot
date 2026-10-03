@@ -23,9 +23,11 @@ class TestParentContract(unittest.TestCase):
     def test_real_subprocess_version_envelope(self):
         data = bc.call_booth("version", cli_path=str(CLI))
         self.assertEqual(data["version"], parent.__version__)
-        self.assertGreaterEqual(tuple(map(int, data["version"].split("."))), (1, 5, 0))
+        self.assertGreaterEqual(tuple(map(int, data["version"].split("."))), (1, 6, 0))
         self.assertIn("shared_request_budget", data["capabilities"])
         self.assertIn("verified_image_input", data["capabilities"])
+        self.assertIn("caller_workflow", data["capabilities"])
+        self.assertEqual(data["ai_execution"]["default"], "caller")
         self.assertEqual(len(data["semantic_fingerprint"]), 64)
 
     def test_bot_search_flags_reach_parent_parser(self):
@@ -57,6 +59,26 @@ class TestParentContract(unittest.TestCase):
     def test_source_evidence_contract_matches_parent(self):
         self.assertEqual((CLI.parent / "search_evidence.py").read_text(encoding="utf-8"),
                          (ROOT / "src/plugins/booth_search/search_evidence.py").read_text(encoding="utf-8"))
+
+    def test_real_subprocess_workflow_schema_and_flags(self):
+        data = bc.call_booth("workflow", {"schema": True}, cli_path=str(CLI))
+        self.assertEqual(data["ai_execution"], "caller")
+        self.assertEqual(data["result_contract"]["ai_calls"], 0)
+        with mock.patch.object(bc, "call_booth", return_value={}) as call:
+            bc.workflow("桔梗用衣装", keywords=["桔梗 衣装"], require_terms=["桔梗"], desc_len=-1)
+        action, params = call.call_args.args
+        args = parent.build_parser().parse_args(parent.bot_params_to_argv(action, params))
+        self.assertEqual(args.keyword, ["桔梗 衣装"])
+        self.assertEqual(args.require_term, ["桔梗"])
+        self.assertEqual(args.desc_len, -1)
+
+    def test_image_delegation_is_explicit_through_parent_parser(self):
+        for opt_in in (False, True):
+            with mock.patch.object(bc, "call_booth", return_value={}) as call:
+                bc.imgsearch("fixture.jpg", delegate_ai=opt_in)
+            action, params = call.call_args.args
+            args = parent.build_parser().parse_args(parent.bot_params_to_argv(action, params))
+            self.assertIs(args.delegate_ai, opt_in)
 
     def test_provider_contract_matches_parent(self):
         self.assertEqual((CLI.parent / "provider_api.py").read_text(encoding="utf-8"),

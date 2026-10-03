@@ -1,0 +1,15 @@
+%%{init: {"markdownAutoWrap":false,"fontFamily":"Microsoft YaHei","fontSize":18,"theme":"base","themeVariables":{"fontFamily":"Microsoft YaHei, Noto Sans CJK SC, sans-serif","fontSize":"18px","primaryColor":"#e8f1ff","primaryBorderColor":"#527db3","primaryTextColor":"#17324d","lineColor":"#7890a5","secondaryColor":"#eff8f2","tertiaryColor":"#fff6e6"},"flowchart":{"curve":"basis","wrappingWidth":400,"nodeSpacing":35,"rankSpacing":45}}}%%
+flowchart TD
+    U["用户文字需求<br/>图片仅在宿主已允许多模态时使用"] --> A["当前工作流中的一个 AI<br/>理解需求 · 提词 · 阅读与判断"]
+    A -->|"默认：完整检索轴"| T["booth workflow / stdin JSON<br/>标准库工具，不调用模型"]
+    T --> B["BOOTH 列表与有限详情<br/>共享缓存 · 限速 · 请求预算"]
+    B --> S["返回商品说明 · 规格 · 原图地址<br/>缺失/截断状态 · 相关性待核查"]
+    S -->|"工具结果交回同一个 AI"| A
+    A --> O["给出有来源的候选与限制<br/>实际适配继续由宿主工作流验收"]
+    A -.->|"用户显式选择额外 AI"| D["smart --delegate-ai<br/>或独立 Bot 的 AI_MODE=api/cli"]
+    D -.-> M["可选用户自选 AI 服务<br/>规划与评估；图片先验证多模态"]
+    M -.-> B
+    classDef current fill:#e7f5ec,stroke:#578b68,color:#245438
+    classDef optional fill:#fff6e6,stroke:#b2945b,color:#76572c,stroke-dasharray:5 5
+    class A,T current
+    class D,M optional

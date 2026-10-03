@@ -4,8 +4,7 @@
 
 ## 亮点
 
-- **三链路搜索，统一收敛 VRChat 圈**：日文关键词直搜 / 中文需求 LLM 转译 /
-  以图搜图（识图模型读图生成关键词），三条链路全部收窄到 `VRChat` 商品圈。
+- **默认工具模式，可选独立 AI**：AI_MODE=caller 不调用或探测任何模型，即使已经有 key。嵌入现有工作流时推荐用母项目 workflow，由同一个 AI 提词和判断；独立 QQ 服务需要自然语言理解/识图时，显式选择 api/cli。
 - **小语种翻译不裸翻**：LLM 直译日语不可靠——借鉴 E 站（E-Hentai）AI 翻译本子类
   开源实践，以术语约束与写法规范驾驭模型：单词级关键词（Booth 多词 AND 匹配脆弱）、
   专有名词片假名完整转写、部位/用途行业词、假名读音与连写变体。
@@ -18,6 +17,20 @@
 - **每一层都有退路**：通用主 API → 可选备用 API，文字失败时原词检索；
   网络检索兜底（DDG/Exa）、双层缓存与双层限速，所有降级如实告知用户。
 
+## 0.4.0 更新：默认 caller，额外 AI 显式选择
+
+需要 booth-cli 1.6.0+。默认 AI_MODE=caller，仅文字检索和本地行业词/读音扩展；不自动发现模型、不调用主/备用 AI、不探测视觉。现有 .env 若已写 AI_MODE=api/cli，继续保持该显式选择。
+
+接入现有 AI 工作流推荐母项目的 [workflow 工具与 Python 适配器](https://github.com/wuhutakeoffyoo/booth-cli/blob/main/WORKFLOW_INTEGRATION.md)，不用安装 Bot 或再填一份 AI key。本仓库 booth_client.workflow 提供同一 source-only 入口；商品相关性/适配由当前 AI 读原文判断。
+
+![默认由同一个 AI 执行](docs/images/caller-workflow.png)
+
+[放大查看 SVG](docs/images/caller-workflow.svg)
+
+独立 QQ Bot 没有外部 AI 接管时，不保证复杂中文理解；显式 AI_MODE=api 才启用独立规划/评估。图片始终需验证多模态能力：caller 关闭 QQ 图片输入；宿主中的当前 AI 已支持识图时，可自行读图后向母项目提交文字检索轴，无需第二模型。缓存版本 14。
+
+离线验证：Bot 200 项、母项目 CLI 237 项、真实跨仓库契约 8 项通过。默认带主/备用 key 仍零模型调用，显式 API 协议与图片能力闸保留；不构成新的搜品准确率评测。
+
 ## 0.3.3 更新
 
 配套 booth-cli 1.5.3。补充完整商品名的证据保护，避免仅引用目标名称便丢弃原词候选；该保护不把标题命中升级为相关或适配确认。缓存版本为 13，验证范围见 [SEARCH_QUALITY.md](SEARCH_QUALITY.md)。
@@ -26,7 +39,7 @@
 
 配套 booth-cli 1.5.2。文字搜索保留短目标原词，二轮保留首轮详情和相关性证据；结果按已核实相关候选、原词候选、未核实建议排序，不满足要求的商品移除。已有明确候选时不补满无证据商品，评估暂不可用时如实提示。查询缓存语义版本递增至 12。实现与评测规则见 [SEARCH_QUALITY.md](SEARCH_QUALITY.md)。
 
-## 0.3.1 更新
+## 0.3.1 更新（历史配置，0.4.0 起需显式 AI 模式）
 
 需要 booth-cli 1.5.0+，该版本配套 CLI 1.5.1。默认通用 API，只填 `AI_API_KEY + AI_BASE_URL` 可自动发现模型；无模型列表时补填 `AI_MODEL`。支持 OpenAI 兼容、Anthropic 与 Gemini 原生协议，旧 VISION_* 兼容，新连接不继承旧模型名。网页搜索独立用 `SEARCH_API_KEY + SEARCH_BASE_URL`，支持通用 JSON、Exa、Tavily、Brave、SearXNG 与自定义适配器，不绑定 OpenCode/GLM 或 Exa。
 
@@ -44,7 +57,9 @@
 
 本项目把面向 QQ 的异步查询与母项目的 CLI 检索能力组合起来：Bot 管理任务、用户通知和缓存，CLI 管理 BOOTH 出站请求；商品判断通过原文引用连接两层。以下均为已经实现的设计。
 
-![vrc-booth-bot 查询流程图](docs/images/search-flow.png)
+默认工作流见上图；下面的 QQ 规划/评估链路仅用于显式 AI_MODE=api/cli。
+
+![vrc-booth-bot 可选 AI 查询流程图](docs/images/search-flow.png)
 
 [放大查看 SVG](docs/images/search-flow.svg)
 
@@ -60,7 +75,7 @@
 
 初始方案 key 不含页码，默认缓存 1800 秒，同一需求翻页可复用规划；结果 key 保留页码和成人模式，避免混用不同页面或筛选。带失败反馈的二轮重新规划不使用初始方案缓存。方案和结果各自保存 expires，写入短时方案不会按其 TTL 清理仍有效的长时结果。
 
-缓存语义包含非敏感配置摘要、固定业务源码与提示词的 SHA-256 指纹，以及母项目 CLI 的语义指纹。缓存版本现为 11，包含 AI 与搜索适配模块、搜索端点、协议与 DDG 开关；凭据值与 .env 不进入摘要，后端 key 是否可用只记录布尔值。源码指纹在进程内缓存，代码更新后必须重启 Bot；文档修改不触发业务缓存失效。
+缓存语义包含非敏感配置摘要、固定业务源码与提示词的 SHA-256 指纹，以及母项目 CLI 语义指纹。缓存版本现为 14，包含 AI_MODE、AI 与搜索适配模块、搜索端点、协议和 DDG 开关；凭据值与 .env 不进入摘要，key 可用性只记录布尔值。caller 与显式 AI 模式不共用结果缓存。代码更新后必须重启；文档不触发业务缓存失效。
 
 实现：[qcache.py](src/plugins/booth_search/qcache.py) 的 `semantic_fingerprint`、`configuration_key`、`get / put`，以及 [__init__.py](src/plugins/booth_search/__init__.py) 的 `_cached_plan`。
 
@@ -99,7 +114,7 @@ AI 规划后，用固定行业词表识别复合需求中的正向术语，再�
 ## 功能
 
 - `/vrc search <关键词>` → 调 booth-cli 关键词搜索（自动收窄 VRChat 圈），返回 Top 结果（名称/价格/链接/店铺/R-18 标记）；末尾数字为页码（如 `/vrc search 猫娘女仆装 2`）
-- `/vrc search` + 图片（或回复一张图片）→ 识图 AI 提取关键词 + booth-cli 反向图搜，
+- 显式 AI_MODE=api/cli 时，`/vrc search` + 图片（或回复图片）→ 经验证的多模态 API 提词 + booth-cli 反向图搜，
   多模态能力检测通过后才启用，双路合并返回候选
 - 「适用于XX素体的服装」类需求：AI 同时产出标题关键词与说明文核实词，
   按商品说明（対応素体/仕様 段落）匹配后置顶，结果注明核实情况
@@ -121,7 +136,8 @@ AI 规划后，用固定行业词表识别复合需求中的正向术语，再�
 
 ```bash
 pip install -e .          # 或 pip install "nonebot2[fastapi]" "nonebot-adapter-onebot" httpx
-cp .env.example .env      # 填入 ONEBOT_ACCESS_TOKEN、AI_API_KEY、AI_BASE_URL 等
+cp .env.example .env      # 填 ONEBOT_ACCESS_TOKEN；默认 caller 不需要 AI key
+# 若要独立 AI 规划/识图：显式 AI_MODE=api，填 AI_API_KEY + AI_BASE_URL
 python bot.py             # 默认 0.0.0.0:8080，等 NapCat 反向 WS 接入
 ```
 
@@ -131,7 +147,7 @@ python bot.py             # 默认 0.0.0.0:8080，等 NapCat 反向 WS 接入
 |---|---|---|
 | `ONEBOT_ACCESS_TOKEN` | 空 | NapCat 反向 WS 的 access_token，两侧必须一致 |
 | `BOOTH_CLI_PATH` | PATH 中找 `booth` | 也可指向 booth.py 绝对路径 |
-| `AI_MODE` | api | 默认通用 API；cli 为显式旧文字模式 |
+| `AI_MODE` | caller | caller 仅文字工具；api 显式独立 AI；cli 显式旧文字模式 |
 | `AI_API_KEY` | 空 | 通用 AI key；旧 VISION_API_KEY 兼容 |
 | `AI_BASE_URL` | 空 | HTTPS 根端点或完整调用端点；旧 VISION_BASE_URL 兼容 |
 | `AI_MODEL` | 空 | 自动发现模型；无模型列表时填写，旧 VISION_MODEL 兼容 |
@@ -158,7 +174,7 @@ python bot.py             # 默认 0.0.0.0:8080，等 NapCat 反向 WS 接入
 | `USER_RATE_LIMIT` | 5 | 同一用户每分钟搜索次数上限 |
 | `GLOBAL_CONCURRENCY` | 2 | 全局并发上限：同时处理的查询数（跨用户共享，防多用户并发打爆 booth.pm/AI 配额，满员告知稍后再试） |
 
-**图片限制**：不能凭服务商或模型名字猜测视觉能力。只上传随机合成测试图验证；未通过时提示模型限制，关闭 QQ 图片、回复图片、内部字节及 CLI 图片入口，不下载或反查用户图片。文字 AI、站内文字检索和 Exa 继续可用。更换模型/端点/key 或重启后重新检测，详见 [AI_SETUP.md](AI_SETUP.md)。
+**图片限制**：caller 不触发探测或处理用户图。显式 AI 模式只上传随机合成图检测，不能凭服务商/模型名猜测；未通过时提示限制，关闭 QQ 图片、回复图片、内部字节及 CLI 图片入口，不下载或反查。文字检索仍可用。宿主原生多模态的当前 AI 可自己读图后提交文字检索轴，详见 [AI_SETUP.md](AI_SETUP.md)。
 
 凭据只从环境变量/.env 读取，本仓库不存任何 key。
 

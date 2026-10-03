@@ -17,7 +17,7 @@ from booth_search.config import Config
 
 class TestBotTargetFlow(unittest.IsolatedAsyncioTestCase):
     async def run_search(self, evaluate):
-        cfg = Config(vision_api_key="placeholder", vision_base_url="https://ai.invalid/v1", vrc_tag="")
+        cfg = Config(ai_mode="api", vision_api_key="placeholder", vision_base_url="https://ai.invalid/v1", vrc_tag="")
         original = dict(id=1, name="みかんバード", price=0, shop={}, tags=[], is_adult=False,
                         url="https://booth.pm/items/1", detail_status="available", _desc="original source")
         noise = dict(original, id=2, name="AvatarPoseSystem", url="https://booth.pm/items/2")

@@ -1,6 +1,6 @@
 %%{init: {"fontFamily":"Microsoft YaHei","fontSize":18,"theme":"base","themeVariables":{"fontFamily":"Microsoft YaHei, Noto Sans CJK SC, sans-serif","fontSize":"18px","primaryColor":"#e8f1ff","primaryBorderColor":"#527db3","primaryTextColor":"#17324d","lineColor":"#7890a5"},"flowchart":{"curve":"basis","wrappingWidth":400,"nodeSpacing":35,"rankSpacing":45}}}%%
 flowchart TD
-    A["已接入并验证多模态 API"] --> B["校验图片来源<br/>安全下载或读取"]
+    A["显式 --delegate-ai<br/>已接入并验证多模态 API"] --> B["校验图片来源<br/>安全下载或读取"]
     B --> C["Bing HTTP 快路径"]
     C -->|"失败或缺少可用结果"| D["浏览器备援"]
     D -->|"仍缺少可用结果"| E["ascii2d 备援<br/>色合与特征检索"]
