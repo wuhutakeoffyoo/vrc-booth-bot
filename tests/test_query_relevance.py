@@ -36,6 +36,55 @@ class TestTargetSelection(unittest.TestCase):
         self.assertFalse(evidence.literal_match({"name": "Bella Hair"}, "Bell"))
         self.assertTrue(evidence.literal_match({"name": "Kitten Bell Choker"}, "Bell"))
 
+    def test_complete_identity_allows_metadata_but_not_theme_or_substring(self):
+        for name in ("Target", "【VRChat】Target [model edition]", "Ｔａｒｇｅｔ（v2）"):
+            self.assertTrue(evidence.identity_match({"name": name}, "Target"))
+        for name in ("Target earrings", "Target themed clothes", "Targeted", "【Target】Dress"):
+            self.assertFalse(evidence.identity_match({"name": name}, "Target"))
+
+    def test_exact_positive_name_is_not_a_negative_evidence_source(self):
+        item = {"id": 1, "name": "Target【model edition】"}
+        value = {"verdict": "retry", "hits": [], "evidence": [{"item_id": "1", "field": "name",
+                 "quote": item["name"], "status": "unsupported", "relation": "thematic"}]}
+        parsed = evidence.grounded_evaluation(value, [item], target_query="Target")
+        self.assertEqual(parsed["hits"], [])
+        self.assertEqual(item["relevance_status"], "unknown")
+        selected, quality = evidence.select_results([item, {"id": 2, "name": "noise"}],
+                                                   "Target", assessed=True)
+        self.assertEqual([it["id"] for it in selected], [1])
+        self.assertEqual(quality["unverified"], 1)
+
+    def test_name_only_reversal_preserves_prior_grounded_evidence(self):
+        original = {"field": "name", "quote": "Target"}
+        item = {"id": 1, "name": "Target", "relevance_status": "related",
+                "relevance_evidence": original.copy()}
+        value = {"verdict": "retry", "evidence": [{"item_id": "1", "field": "name",
+                 "quote": "Target", "status": "unsupported"}]}
+        evidence.grounded_evaluation(value, [item], target_query="Target")
+        self.assertEqual(item["relevance_status"], "related")
+        self.assertEqual(item["relevance_evidence"], original)
+
+    def test_category_conflict_is_not_overridden_by_complete_name(self):
+        item = {"id": 1, "name": "Target", "category": "2D素材"}
+        value = {"verdict": "retry", "evidence": [{"item_id": "1", "field": "category",
+                 "quote": "2D素材", "status": "unsupported"}]}
+        evidence.grounded_evaluation(value, [item], target_query="Target")
+        self.assertEqual(item["relevance_status"], "unsupported")
+
+    def test_explicit_negative_name_is_not_protected(self):
+        item = {"id": 1, "name": "Target【非対応】"}
+        value = {"verdict": "retry", "evidence": [{"item_id": "1", "field": "name",
+                 "quote": item["name"], "status": "unsupported"}]}
+        evidence.grounded_evaluation(value, [item], target_query="Target")
+        self.assertEqual(item["relevance_status"], "unsupported")
+
+    def test_compatibility_requirement_still_cannot_be_overridden_by_name(self):
+        item = {"id": 1, "name": "Target"}
+        value = {"verdict": "retry", "evidence": [{"item_id": "1", "field": "name",
+                 "quote": "Target", "status": "unsupported"}]}
+        evidence.grounded_evaluation(value, [item], ["model"], target_query="Target")
+        self.assertEqual(item["relevance_status"], "unsupported")
+
     def test_second_round_noise_cannot_replace_exact_first_round_target(self):
         original = {"id": 1, "name": "みかんバード", "_desc": "full source", "detail_status": "available"}
         second = [{"id": 2, "name": "AvatarPoseSystem"}, {"id": 1, "name": "みかんバード"}]
@@ -98,7 +147,7 @@ class TestTargetSelection(unittest.TestCase):
         item = {"id": 1, "name": "Target patterned earrings"}
         value = {"verdict": "ok", "hits": ["1"], "evidence": [{"item_id": "1", "field": "name",
                  "quote": item["name"], "status": "related", "relation": "thematic"}]}
-        parsed = evidence.grounded_evaluation(value, [item])
+        parsed = evidence.grounded_evaluation(value, [item], target_query="Target")
         self.assertEqual(parsed["hits"], [])
         selected, _ = evidence.select_results([item], "Target", assessed=True)
         self.assertEqual(selected, [])

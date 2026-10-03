@@ -735,7 +735,8 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
             titles = search_evidence.candidate_lines(merged[:12], desc_kws or used_terms)
             ev = await execution.stage("evaluate", lambda: _ai_evaluate(hint, used_terms, titles))
             ev = vision.validate_evaluation(ev, titles)
-            ev = search_evidence.grounded_evaluation(ev, merged[:12], desc_kws)
+            ev = search_evidence.grounded_evaluation(ev, merged[:12], desc_kws,
+                target_query=search_evidence.literal_query(hint, vision.INDUSTRY_SYNONYMS))
             logger.info(f"第一轮评估: {ev.get('verdict')} {ev.get('reason')}")
             # 保守 retry：评估员放行但标题命中率过低时仍触发二轮
             need_retry = (ev.get("verdict") == "retry" and bool(ev.get("keywords"))) or \
@@ -773,7 +774,8 @@ async def _handle_text(hint: str, adult: str | None = None, page: int = 1,
                             titles2 = search_evidence.candidate_lines(merged[:12], desc_kws or used_terms)
                             ev2 = await execution.stage("evaluate_round2", lambda: _ai_evaluate(hint, used_terms, titles2))
                             ev2 = vision.validate_evaluation(ev2, titles2)
-                            ev2 = search_evidence.grounded_evaluation(ev2, merged[:12], desc_kws)
+                            ev2 = search_evidence.grounded_evaluation(ev2, merged[:12], desc_kws,
+                                target_query=search_evidence.literal_query(hint, vision.INDUSTRY_SYNONYMS))
                             eval_note = ("第二轮找到至少三条有来源证据的相关候选（适配以商品说明为准）" if ev2.get("verdict") == "ok"
                                          else "两轮搜索后仍未完全确认，以下为最接近的结果"
                                               "（可补充材质/颜色/用途等描述再试）")

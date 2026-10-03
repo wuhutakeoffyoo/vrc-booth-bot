@@ -46,6 +46,13 @@ class TestBotTargetFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(value["entries"][0]["relevance_status"], "unknown")
         self.assertIn("尚未核实", value["header"])
 
+    async def test_negative_judgement_cannot_discard_exact_name_without_contradiction(self):
+        value, _ = await self.run_search([{"verdict": "retry", "keywords": [], "evidence": [
+            {"item_id": "1", "field": "name", "quote": "みかんバード",
+             "status": "unsupported", "relation": "thematic"}]}])
+        self.assertEqual([it["id"] for it in value["entries"]], [1])
+        self.assertEqual(value["entries"][0]["relevance_status"], "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()
