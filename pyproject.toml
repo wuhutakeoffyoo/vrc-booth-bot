@@ -1,6 +1,6 @@
 [project]
 name = "booth-bot"
-version = "0.3.1"
+version = "0.3.2"
 description = "NoneBot2 bot 接入 booth-cli：/vrc search 文本或图片搜 Booth.pm 商品（含识图 AI 提词）"
 requires-python = ">=3.10"
 dependencies = [

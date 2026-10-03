@@ -5,7 +5,119 @@ import re
 import unicodedata
 
 NEGATIVE = re.compile(r"対応して(?:いません|おりません)|非対応|未対応|not\s+(?:compatible|supported)|不(?:兼容|支持)", re.I)
-NEGATED_REQUEST = re.compile(r"不要|不想|不需要|不找|排除|别(?:给|要|找)?|除外|不要な|いらない|without|exclude|not\s", re.I)
+NEGATED_REQUEST = re.compile(r"不要|不想|不需要|不找|排除|别(?:给|要|找)?|除外|不要な|いらない|\b(?:without|exclude|not)\b", re.I)
+GENERIC_TERMS = {"vrchat", "vrc", "booth", "3d", "3dモデル", "3d model", "アバター",
+                 "avatar", "アクセサリ", "アクセサリー", "小物", "雑貨", "対応",
+                 "衣装", "髪型", "ギミック", "テクスチャ", "素材", "asset", "assets"}
+
+
+def normalized(value):
+    return " ".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
+
+
+def generic_term(value):
+    key = normalized(value)
+    parts = re.split(r"[\s/、，,]+", key)
+    return key in GENERIC_TERMS or bool(parts) and all(part in GENERIC_TERMS for part in parts)
+
+
+def literal_query(query, seeds=()):
+    """Keep short target phrases, but never turn negated prose into a positive seed."""
+    query = str(query or "").strip()
+    if not query or len(query) > 48 or len(query.split()) > 5:
+        return ""
+    if re.search(r"[，,。；;！？!?\n]", query) or NEGATED_REQUEST.search(query):
+        return ""
+    if re.search(r"想(?:要|找|搜)|搜索|帮我|适用|兼容|対応|compatible|looking\s+for", query, re.I):
+        return ""
+    # Known Chinese concepts already have tested Japanese retrieval seeds.
+    if positive_seeds(query, seeds):
+        return ""
+    return query
+
+
+def retrieval_terms(query, proposed, seeds=(), *, previous=(), limit=6):
+    """Reserve one of the existing slots for the original target; drop generic drift.
+
+    Retry uses only new terms. The original axis was already fetched in round one,
+    so it remains in the merged pool without spending another request.
+    """
+    anchor = literal_query(query, seeds)
+    old = {normalized(term) for term in previous}
+    seen, result = set(old), []
+    for term in ([anchor] if anchor and not previous else []) + list(proposed or []):
+        term = str(term or "").strip()
+        key = normalized(term)
+        if not key or key in seen:
+            continue
+        if generic_term(key) and key != normalized(query):
+            continue
+        seen.add(key)
+        result.append(term)
+    return result[:limit]
+
+
+def literal_match(item, query):
+    target = normalized(query)
+    name = normalized(item.get("name"))
+    if not target or not name:
+        return False
+    # ASCII word boundaries avoid Bell -> Bella while retaining CJK compounds.
+    if re.fullmatch(r"[a-z0-9][a-z0-9 _-]*", target):
+        return bool(re.search(r"(?<![a-z0-9])" + re.escape(target) + r"(?![a-z0-9])", name))
+    return target in name
+
+
+def rank_target(entries, query, seeds=(), required_terms=()):
+    anchor = literal_query(query, seeds)
+
+    def key(item):
+        state = item.get("relevance_status")
+        if state == "unsupported":
+            return 3
+        if state == "related":
+            return 0
+        if anchor and not required_terms and literal_match(item, anchor):
+            return 1
+        return 2
+
+    return sorted(entries, key=key)
+
+
+def merge_rounds(first, second, query, seeds=(), required_terms=()):
+    """Retain fetched details and first-round evidence when duplicate IDs recur."""
+    by_id = {str(item["id"]): item for item in first}
+    merged, seen = [], set()
+    for item in list(second) + list(first):
+        identity = str(item["id"])
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(by_id.get(identity, item))
+    return rank_target(merged, query, seeds, required_terms)
+
+
+def select_results(entries, query, seeds=(), required_terms=(), *, assessed=False, display_limit=None):
+    """Return grounded hits and literal candidates without padding with unknowns.
+
+    An outage must not erase all search candidates. Without positive evidence or
+    literal matches, keep up to three explicitly unverified suggestions after an
+    assessment; direct searches retain their normal result pool.
+    """
+    ordered = rank_target(entries, query, seeds, required_terms)
+    eligible = [it for it in ordered if it.get("relevance_status") != "unsupported"]
+    anchor = literal_query(query, seeds)
+    selected = [it for it in eligible if it.get("relevance_status") == "related" or
+                (anchor and not required_terms and literal_match(it, anchor))]
+    if not selected:
+        selected = eligible[:3] if assessed else eligible
+    omitted = len(entries) - len(selected)
+    if display_limit is not None:
+        selected = selected[:display_limit]
+    related = sum(it.get("relevance_status") == "related" for it in selected)
+    quality = {"related": related, "unverified": len(selected) - related,
+               "omitted": omitted}
+    return selected, quality
 
 
 def positive_seeds(query, seeds):
@@ -92,13 +204,15 @@ def grounded_evaluation(data, entries, required_terms=()):
         state = claim.get("status")
         if field not in fields or not quote or quote not in fields[field]:
             continue
-        if state == "unsupported":
+        if state == "unsupported" or (state == "related" and claim.get("relation") == "thematic"):
             item["relevance_status"] = "unsupported"
             item["relevance_evidence"] = {"field": field, "quote": quote[:240]}
+            if claim.get("relation") == "thematic":
+                item["relevance_evidence"]["relation"] = "thematic"
             blocked.add(str(number))
             accepted.discard(str(number))
             continue
-        if state != "related" or str(number) in blocked:
+        if state != "related" or claim.get("relation") == "unknown" or str(number) in blocked:
             continue
         if required_terms:
             if field != "description" or item.get("detail_status") != "available":

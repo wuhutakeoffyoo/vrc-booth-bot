@@ -18,9 +18,13 @@
 - **每一层都有退路**：通用主 API → 可选备用 API，文字失败时原词检索；
   网络检索兜底（DDG/Exa）、双层缓存与双层限速，所有降级如实告知用户。
 
+## 0.3.2 更新
+
+配套 booth-cli 1.5.2。文字搜索保留短目标原词，二轮保留首轮详情和相关性证据；结果按已核实相关候选、原词候选、未核实建议排序，不满足要求的商品移除。已有明确候选时不补满无证据商品，评估暂不可用时如实提示。查询缓存语义版本递增至 12。实现与评测规则见 [SEARCH_QUALITY.md](SEARCH_QUALITY.md)。
+
 ## 0.3.1 更新
 
-需要 booth-cli 1.5.0+，当前配套 CLI 1.5.1。默认通用 API，只填 `AI_API_KEY + AI_BASE_URL` 可自动发现模型；无模型列表时补填 `AI_MODEL`。支持 OpenAI 兼容、Anthropic 与 Gemini 原生协议，旧 VISION_* 兼容，新连接不继承旧模型名。网页搜索独立用 `SEARCH_API_KEY + SEARCH_BASE_URL`，支持通用 JSON、Exa、Tavily、Brave、SearXNG 与自定义适配器，不绑定 OpenCode/GLM 或 Exa。
+需要 booth-cli 1.5.0+，该版本配套 CLI 1.5.1。默认通用 API，只填 `AI_API_KEY + AI_BASE_URL` 可自动发现模型；无模型列表时补填 `AI_MODEL`。支持 OpenAI 兼容、Anthropic 与 Gemini 原生协议，旧 VISION_* 兼容，新连接不继承旧模型名。网页搜索独立用 `SEARCH_API_KEY + SEARCH_BASE_URL`，支持通用 JSON、Exa、Tavily、Brave、SearXNG 与自定义适配器，不绑定 OpenCode/GLM 或 Exa。
 
 启动及首次图片查询先检测多模态能力；未配置、不支持或检测暂不可用时，提示限制并关闭所有图片搜索入口，仅保留文字搜索。接入通过检测的多模态 API 后才允许识图和图片反查。配置、实现原理与能力流程图见 [AI_SETUP.md](AI_SETUP.md)。
 

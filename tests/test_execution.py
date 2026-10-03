@@ -135,7 +135,9 @@ class TestActiveSearch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail.await_count, 1)
         self.assertEqual(len(detail.call_args.args[0]), 6)
         self.assertIn("商品说明原文", value["text"])
-        self.assertIn("相关性未核实", value["text"])
+        self.assertEqual(len(value["entries"]), 3)
+        self.assertEqual(value["quality"]["omitted"], 5)
+        self.assertEqual(items[3]["relevance_status"], "unknown")
         self.assertNotIn("已确认", value["text"])
 
     async def test_second_round_normalizes_then_drops_previous_terms(self):
