@@ -104,3 +104,9 @@ class Config(BaseModel):
     # 容量上限超出自动清理最旧。0 = 关闭缓存
     query_cache_ttl: int = 1800
     query_cache_max: int = 300
+    # 关注清单（/vrc watch）：后台定时检查价格/补货/商品更新并推送变动到群。
+    # 后台检查走 CLI 共享请求预算（每项 ≥1s 限速，单轮上限见 CLI 侧配置）；
+    # 推送目标为 watch_notify_groups，留空则用群白名单
+    watch_enabled: bool = False
+    watch_interval: int = 3600          # 后台检查间隔（秒），最小 600
+    watch_notify_groups: list[int | str] = []

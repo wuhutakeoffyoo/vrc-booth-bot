@@ -265,6 +265,19 @@ AI_MODE=cli：仅显式启用的旧文字模式，不作为默认 API 失败后�
 > 用默认路径（同机子进程自然共享）。bot 对 CLI 的预算上限（12/18）是硬约束，超限时明确
 > 报错而非静默放宽。
 
+### 5.2 关注清单与变动提醒（watch，2026-10 新增）
+
+借鉴 [MioVRC_AssetManager](https://github.com/CokoIya/MioVRC_AssetManager) 的
+已购标记与 Booth 更新检查，落在搜索工具的定位内：
+
+- **CLI `booth watch add/remove/list/check`**：本机 sqlite 快照
+  （`BOOTH_WISH_DB` 可覆盖）；`check` 逐项 no_cache 拉详情对比，产出
+  降价/补货/商品更新/改名变动；单轮上限 30 项，出站计入共享请求预算。
+- **搜索标记**：search/smart 的 items 命中关注清单时带 `watched: true`。
+- **bot `/vrc watch`**：add/list/check/remove 指令（信封 watch action）；
+  `WATCH_ENABLED` 开启后 asyncio 后台循环定时 check（间隔 ≥600s），
+  有变动时推送 `WATCH_NOTIFY_GROUPS`（空则群白名单）。
+
 ## 6. 参考的开源项目
 
 ### 直接借鉴（协议与机制）

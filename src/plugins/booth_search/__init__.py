@@ -37,6 +37,8 @@ class BoothUnavailable(RuntimeError):
 
 SEARCH_RE = re.compile(r"^[/！!]?vrc\s*search(?:\s+(.*))?$", re.I | re.S)
 R18_RE = re.compile(r"^[/！!]?vrc\s*r18(?:\s+(.*))?$", re.I | re.S)
+WATCH_RE = re.compile(r"^[/！!]?vrc\s+watch(?:\s+(.*))?$", re.I | re.S)
+_ITEM_ID_RE = re.compile(r"(?:items/)?(\d{3,})")
 PAGE_RE = re.compile(r"^(.*?\S)\s+(\d{1,3})$")
 USAGE = ("用法:\n/vrc search <关键词>   —— Booth 商品搜索\n"
          "/vrc search <关键词> <页码> —— 翻页（如 /vrc search 猫娘女仆装 2）\n"
@@ -86,8 +88,17 @@ def _r18_rule(event) -> bool:
     return _is_r18(event) and _access_ok(event)
 
 
+def _is_watch(event) -> bool:
+    return bool(WATCH_RE.match(_plain(event)))
+
+
+def _watch_rule(event) -> bool:
+    return _is_watch(event) and _access_ok(event)
+
+
 matcher = on_message(Rule(_search_rule), priority=10, block=True)
 r18_matcher = on_message(Rule(_r18_rule), priority=10, block=True)
+watch_matcher = on_message(Rule(_watch_rule), priority=10, block=True)
 
 
 def _collect_image_urls(event: MessageEvent) -> list:
@@ -938,6 +949,163 @@ async def _do_search(bot, event: MessageEvent):
         qcache.put(cache_key, result, ttl=plugin_config.query_cache_ttl,
                    max_entries=plugin_config.query_cache_max)
     await _send_result(bot, event, result)
+
+
+# ---------------------------------------------------------------- 关注清单（/vrc watch）
+# 能力借鉴自 MioVRC_AssetManager 的「Booth 更新检查/已购标记」：本地关注清单 +
+# 变动检查（降价/补货/商品更新），后台定时检查并可推送提醒到群。
+# 存储与出站全在 CLI 侧（本机 sqlite + booth.pm 白名单 + 共享请求预算）。
+
+WATCH_USAGE = ("用法:\n"
+               "/vrc watch <商品ID|链接> —— 关注商品（可多个）\n"
+               "/vrc watch list —— 查看关注清单\n"
+               "/vrc watch check —— 立即检查变动（降价/补货/更新）\n"
+               "/vrc watch remove <ID> —— 取消关注")
+
+
+def _parse_watch_ids(text: str) -> list:
+    """从指令文本解析商品 ID 列表（纯数字或 items/ 链接）。"""
+    ids = []
+    for tok in (text or "").split():
+        m = _ITEM_ID_RE.search(tok)
+        if not m:
+            raise ValueError(f"无法识别的商品 ID 或链接: {tok}")
+        iid = int(m.group(1))
+        if iid not in ids:
+            ids.append(iid)
+    return ids
+
+
+def format_watch_changes(check_data: dict) -> str:
+    """把 CLI watch check 的 JSON 结果格式化为群消息文本（纯函数）。"""
+    changed = check_data.get("changed") or []
+    errors = check_data.get("errors") or []
+    if not changed and not errors:
+        return f"已检查 {check_data.get('checked', 0)} 件关注商品，暂无变动。"
+    lines = []
+    for c in changed:
+        price = f"  ¥{c['price']:,}" if isinstance(c.get("price"), int) else ""
+        lines.append(f"🔎 {c.get('name') or c.get('id')}{price}")
+        lines.append(f"   https://booth.pm/ja/items/{c.get('id')}")
+        for d in c.get("changes") or []:
+            lines.append(f"   {d}")
+    for e in errors[:3]:
+        lines.append(f"⚠ #{e.get('id')} 检查失败: {str(e.get('error'))[:60]}")
+    return "\n".join(lines)
+
+
+@watch_matcher.handle()
+async def handle_vrc_watch(bot, event: MessageEvent):
+    ok, wait = access.check_rate(plugin_config, getattr(event, "user_id", ""))
+    if not ok:
+        await watch_matcher.finish(f"查询太频繁：请 {wait} 秒后再试")
+    m = WATCH_RE.match(_plain(event))
+    text = (m.group(1) or "").strip() if m else ""
+    parts = text.split()
+    op = parts[0].lower() if parts else "list"
+    rest = parts[1:]
+
+    if op in ("add", "remove", "rm", "del"):
+        try:
+            ids = _parse_watch_ids(" ".join(rest))
+        except ValueError as e:
+            await watch_matcher.finish(f"{e}\n{WATCH_USAGE}")
+        if not ids:
+            await watch_matcher.finish(WATCH_USAGE)
+        cli_op = "add" if op == "add" else "remove"
+        await watch_matcher.send("正在处理关注清单…")
+        try:
+            data = await asyncio.to_thread(
+                booth_client.call_booth, "watch",
+                {"op": cli_op, "ids": [str(i) for i in ids]},
+                cli_path=plugin_config.booth_cli_path,
+                timeout=plugin_config.search_timeout)
+        except booth_client.BoothCliError as e:
+            await watch_matcher.finish(f"操作失败: {e}")
+        if cli_op == "add":
+            lines = []
+            for r in data.get("results") or []:
+                price = f"¥{r['price']:,}" if isinstance(r.get("price"), int) else "价格未知"
+                note = "（已在清单）" if r.get("already") else ""
+                lines.append(f"♥ 已关注 {r.get('name')}  {price}{note}\n"
+                             f"https://booth.pm/ja/items/{r.get('id')}")
+            await watch_matcher.finish("\n".join(lines) or "已添加。")
+        else:
+            n = sum(1 for r in data.get("results") or [] if r.get("removed"))
+            await watch_matcher.finish(f"已移除 {n} 件。")
+
+    if op == "check":
+        await watch_matcher.send("正在检查关注商品变动（每件 ≥1 秒限速，请稍候）…")
+        try:
+            data = await asyncio.to_thread(
+                booth_client.call_booth, "watch", {"op": "check"},
+                cli_path=plugin_config.booth_cli_path,
+                timeout=max(plugin_config.search_timeout, 120))
+        except booth_client.BoothCliError as e:
+            await watch_matcher.finish(f"检查失败: {e}")
+        await watch_matcher.finish(format_watch_changes(data))
+
+    if op in ("list", "ls"):
+        try:
+            data = await asyncio.to_thread(
+                booth_client.call_booth, "watch", {"op": "list"},
+                cli_path=plugin_config.booth_cli_path,
+                timeout=plugin_config.search_timeout)
+        except booth_client.BoothCliError as e:
+            await watch_matcher.finish(f"读取失败: {e}")
+        items = data.get("items") or []
+        if not items:
+            await watch_matcher.finish("关注清单为空。用法: /vrc watch <商品ID|链接>")
+        lines = [f"关注清单 {len(items)} 件："]
+        for it in items[:15]:
+            price = f"¥{it['price']:,}" if isinstance(it.get("price"), int) else "价格未知"
+            sold = " [已售罄]" if it.get("is_sold_out") else ""
+            lines.append(f"♥ {it.get('name')}  {price}{sold}\n"
+                         f"   https://booth.pm/ja/items/{it.get('id')}")
+        if len(items) > 15:
+            lines.append(f"… 共 {len(items)} 件，仅显示前 15 件")
+        await watch_matcher.finish("\n".join(lines))
+
+    await watch_matcher.finish(WATCH_USAGE)
+
+
+async def _watch_background_loop():
+    """后台定时检查关注商品变动并推送（watch_enabled 开启时启动）。
+    出站走 CLI 共享请求预算；推送目标 watch_notify_groups（空则群白名单）。"""
+    cfg = plugin_config
+    interval = max(600, cfg.watch_interval)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            data = await asyncio.to_thread(
+                booth_client.call_booth, "watch", {"op": "check"},
+                cli_path=cfg.booth_cli_path, timeout=max(cfg.search_timeout, 120))
+        except booth_client.BoothCliError as e:
+            logger.warning(f"watch 后台检查失败: {e}")
+            continue
+        changed = data.get("changed") or []
+        if not changed:
+            continue
+        text = "【关注商品变动】\n" + format_watch_changes(data)
+        groups = [str(g) for g in (cfg.watch_notify_groups or cfg.group_whitelist or [])]
+        try:
+            from nonebot import get_bot
+            bot = get_bot()
+        except Exception:
+            logger.info("watch 检测到变动但 bot 未连接，跳过推送")
+            continue
+        for gid in groups:
+            try:
+                await bot.call_api("send_group_msg", group_id=int(gid), message=text)
+            except Exception as e:
+                logger.warning(f"watch 推送到群 {gid} 失败: {e}")
+
+
+@get_driver().on_startup
+async def start_watch_loop():
+    if plugin_config.watch_enabled:
+        asyncio.create_task(_watch_background_loop())
+        logger.info(f"关注清单后台检查已启动（间隔 {max(600, plugin_config.watch_interval)}s）")
 
 
 @r18_matcher.handle()
