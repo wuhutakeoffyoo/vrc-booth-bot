@@ -42,6 +42,17 @@ class TestWatchParsing(unittest.TestCase):
                                        "errors": [{"id": 9, "error": "HTTP 429"}]})
         self.assertIn("429", err)
 
+    def test_item_and_for_regexes(self):
+        for ok in ("/vrc item 123", "vrc item https://booth.pm/ja/items/3368697",
+                   "/VRC ITEM 456"):
+            self.assertTrue(bs.ITEM_CMD_RE.match(ok), ok)
+        for bad in ("/vrc itemx 1", "/vrcitem 1", "/vrc search x"):
+            self.assertFalse(bs.ITEM_CMD_RE.match(bad), bad)
+        for ok in ("/vrc for Rexouium", "vrc for 桔梗", "/VRC FOR Kikyo"):
+            self.assertTrue(bs.FOR_RE.match(ok), ok)
+        for bad in ("/vrc force", "/vrcfor x", "/vrc search x"):
+            self.assertFalse(bs.FOR_RE.match(bad), bad)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -265,6 +265,40 @@ async def _api_post(url: str, payload: dict, api_key: str,
                 await asyncio.sleep(1.5 * (attempt + 1))
 
 
+_ITEM_INFO_PROMPT = (
+    "把 Booth.pm（VRChat 素材市场）的商品信息翻译成简体中文，供中文玩家理解。"
+    "只输出 JSON："
+    '{"name_zh": "商品名中文", "desc_zh": "说明摘要中文（120字内，保留关键信息：'
+    '内容物/适配素体/使用条件/注意事项）"}\n'
+    "要求：术语按 VRChat 圈习惯（アバター=模型/头像、ギミック=机关/互动功能、"
+    "素体名/作者名保留原文括注）；说明只摘与购买决策相关的要点，不逐句直译。"
+)
+
+
+async def translate_item_info(name: str, description: str, *, base_url: str,
+                              api_key: str, model: str, timeout: int = 60) -> dict:
+    """商品名+说明 → 中文（一次调用）。失败抛异常，由调用方按无翻译降级。"""
+    guard_api_base(base_url)
+    model = await asyncio.to_thread(provider_api.resolve_model, base_url, api_key,
+                                    model, min(timeout, 15))
+    url = provider_api.endpoint(base_url, model)[2]
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content":
+                      f"{_ITEM_INFO_PROMPT}\n商品名：{name}\n商品说明：{(description or '')[:1200]}"}],
+        "temperature": 0.2,
+        "max_tokens": 1200,
+    }
+    payload.update(search_evidence.structured_options(model))
+    content = await _api_post(url, payload, api_key, timeout=timeout)
+    m = re.search(r"\{.*\}", content or "", re.S)
+    if not m:
+        raise RuntimeError(f"翻译输出不含 JSON: {(content or '')[-120:]}")
+    data = json.loads(m.group(0))
+    return {"name_zh": str(data.get("name_zh") or "")[:120],
+            "desc_zh": str(data.get("desc_zh") or "")[:400]}
+
+
 async def extract_keywords(image_bytes: bytes, *, hint: str = "",
                            base_url: str, api_key: str, model: str,
                            session_id: str = "", timeout: int = 60) -> tuple[list, str]:

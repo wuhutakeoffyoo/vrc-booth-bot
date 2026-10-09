@@ -38,6 +38,8 @@ class BoothUnavailable(RuntimeError):
 SEARCH_RE = re.compile(r"^[/！!]?vrc\s*search(?:\s+(.*))?$", re.I | re.S)
 R18_RE = re.compile(r"^[/！!]?vrc\s*r18(?:\s+(.*))?$", re.I | re.S)
 WATCH_RE = re.compile(r"^[/！!]?vrc\s+watch(?:\s+(.*))?$", re.I | re.S)
+ITEM_CMD_RE = re.compile(r"^[/！!]?vrc\s+item(?:\s+(.*))?$", re.I | re.S)
+FOR_RE = re.compile(r"^[/！!]?vrc\s+for(?:\s+(.*))?$", re.I | re.S)
 _ITEM_ID_RE = re.compile(r"(?:items/)?(\d{3,})")
 PAGE_RE = re.compile(r"^(.*?\S)\s+(\d{1,3})$")
 USAGE = ("用法:\n/vrc search <关键词>   —— Booth 商品搜索\n"
@@ -96,9 +98,27 @@ def _watch_rule(event) -> bool:
     return _is_watch(event) and _access_ok(event)
 
 
+def _is_item_cmd(event) -> bool:
+    return bool(ITEM_CMD_RE.match(_plain(event)))
+
+
+def _item_cmd_rule(event) -> bool:
+    return _is_item_cmd(event) and _access_ok(event)
+
+
+def _is_for(event) -> bool:
+    return bool(FOR_RE.match(_plain(event)))
+
+
+def _for_rule(event) -> bool:
+    return _is_for(event) and _access_ok(event)
+
+
 matcher = on_message(Rule(_search_rule), priority=10, block=True)
 r18_matcher = on_message(Rule(_r18_rule), priority=10, block=True)
 watch_matcher = on_message(Rule(_watch_rule), priority=10, block=True)
+item_matcher = on_message(Rule(_item_cmd_rule), priority=10, block=True)
+for_matcher = on_message(Rule(_for_rule), priority=10, block=True)
 
 
 def _collect_image_urls(event: MessageEvent) -> list:
@@ -1158,4 +1178,91 @@ async def _do_r18(bot, event: MessageEvent):
     if result.get("entries") and plugin_config.query_cache_ttl > 0:
         qcache.put(cache_key, result, ttl=plugin_config.query_cache_ttl,
                    max_entries=plugin_config.query_cache_max)
+    await _send_result(bot, event, result)
+
+
+# ---------------------------------------------------------------- 商品详情与素体快捷指令
+# /vrc item <ID|链接>：详情 + AI 中文翻译（借鉴 MioVRCA 的「中文名翻译/说明可翻译」），
+#                     合并转发带图；/vrc for <素体名>：按素体找衣装的快捷入口
+#                     （复用 _handle_text 的 desc_keywords 核实链路）。
+
+ITEM_CMD_USAGE = "用法: /vrc item <商品ID|链接>（详情+中文翻译）"
+
+
+async def _translate_item_info(name: str, description: str) -> dict:
+    """商品名+说明 → 中文（主/兜底 API 逐个尝试）；都不可用抛 BoothUnavailable。"""
+    cfg = plugin_config
+    if cfg.ai_mode == "caller":
+        raise BoothUnavailable("caller 模式下不调用模型翻译；可换 AI_MODE=api 配置后使用")
+    last_err = None
+    for backend in _configured_apis():
+        try:
+            return await vision.translate_item_info(
+                name, description, timeout=cfg.vision_timeout, **backend)
+        except Exception as e:
+            last_err = e
+            logger.warning(f"商品翻译失败: {vision.friendly_ai_error(e)}")
+    raise BoothUnavailable(
+        f"商品翻译不可用: {vision.friendly_ai_error(last_err) if last_err else '未配置 AI'}")
+
+
+@item_matcher.handle()
+async def handle_vrc_item(bot, event: MessageEvent):
+    ok, wait = access.check_rate(plugin_config, getattr(event, "user_id", ""))
+    if not ok:
+        await item_matcher.finish(f"查询太频繁：请 {wait} 秒后再试")
+    m = ITEM_CMD_RE.match(_plain(event))
+    text = (m.group(1) or "").strip() if m else ""
+    if not text:
+        await item_matcher.finish(ITEM_CMD_USAGE)
+    id_m = re.search(r"(?:items/)?(\d{3,})", text)
+    if not id_m:
+        await item_matcher.finish(f"无法识别商品 ID 或链接。{ITEM_CMD_USAGE}")
+    await item_matcher.send("正在获取商品详情并翻译…")
+    try:
+        it = await asyncio.to_thread(
+            booth_client.item, id_m.group(1),
+            cli_path=plugin_config.booth_cli_path,
+            timeout=plugin_config.search_timeout)
+    except booth_client.BoothCliError as e:
+        await item_matcher.finish(f"获取失败: {e}")
+    zh_note = ""
+    try:
+        zh = await _translate_item_info(it.get("name") or "",
+                                        it.get("description") or "")
+        it["name_zh"] = zh.get("name_zh") or None
+        it["desc_zh"] = zh.get("desc_zh") or None
+    except (BoothUnavailable, Exception) as e:  # noqa: BLE001
+        zh_note = f"⚠ {e}"
+    header = f"商品详情 #{it.get('id')}"
+    if it.get("name_zh"):
+        header += f"\n{it['name_zh']}"
+    body = format.format_results([it], max_n=1, title=header)
+    if it.get("desc_zh"):
+        body += f"\n中文摘要: {it['desc_zh']}"
+    if zh_note:
+        body += f"\n{zh_note}"
+    result = {"text": body, "entries": [it], "header": header,
+              "notes": [zh_note] if zh_note else []}
+    await _send_result(bot, event, result)
+
+
+@for_matcher.handle()
+async def handle_vrc_for(bot, event: MessageEvent):
+    ok, wait = access.check_rate(plugin_config, getattr(event, "user_id", ""))
+    if not ok:
+        await for_matcher.finish(f"查询太频繁：请 {wait} 秒后再试")
+    m = FOR_RE.match(_plain(event))
+    base = (m.group(1) or "").strip() if m else ""
+    if not base:
+        await for_matcher.finish("用法: /vrc for <素体名>（找适配该素体的衣装/素材，"
+                                 "结果按商品说明核实适配）")
+    await for_matcher.send(f"正在找适配「{base}」的素材（说明文核实，约 30-90 秒）…")
+    try:
+        result = await _handle_text(f"适用于{base}素体的服装", notify=for_matcher.send)
+    except booth_client.BoothCliError as e:
+        result = {"text": f"搜索失败: {e}", "entries": []}
+    except Exception as e:
+        logger.exception("vrc for 未捕获异常")
+        result = {"text": f"内部错误: {type(e).__name__}: {e}", "entries": []}
     await _send_result(bot, event, result)
